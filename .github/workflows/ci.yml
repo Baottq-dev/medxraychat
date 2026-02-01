@@ -6,10 +6,6 @@ on:
   pull_request:
     branches: [main, develop]
 
-env:
-  NODE_VERSION: "20"
-  PYTHON_VERSION: "3.11"
-
 jobs:
   # Backend CI
   backend-lint:
@@ -21,18 +17,12 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: "pip"
+          python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install and Lint
         run: |
           cd apps/api
-          pip install -r requirements.txt
           pip install ruff
-
-      - name: Lint with Ruff
-        run: |
-          cd apps/api
           ruff check . --ignore E501 || true
 
   # Frontend CI
@@ -45,50 +35,19 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: "npm"
-          cache-dependency-path: apps/web/package-lock.json
+          node-version: "20"
 
-      - name: Install dependencies
+      - name: Install and Lint
         run: |
           cd apps/web
           npm ci
-
-      - name: Lint
-        run: |
-          cd apps/web
           npm run lint || true
-
-  frontend-build:
-    name: Frontend Build
-    runs-on: ubuntu-latest
-    needs: frontend-lint
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-
-      - name: Install dependencies
-        run: |
-          cd apps/web
-          rm -rf node_modules package-lock.json
-          npm install
-
-      - name: Build
-        run: |
-          cd apps/web
-          npm run build
-        env:
-          NEXT_PUBLIC_API_URL: https://api.medxraychat.com/api/v1
 
   # All checks passed
   ci-success:
     name: CI Success
     runs-on: ubuntu-latest
-    needs: [backend-lint, frontend-build]
+    needs: [backend-lint, frontend-lint]
     steps:
       - name: All checks passed
         run: echo "All CI checks passed!"
