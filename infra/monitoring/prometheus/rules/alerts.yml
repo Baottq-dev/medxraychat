@@ -1,0 +1,191 @@
+# Alert Rules for MedXrayChat
+# These rules define alerting conditions for the application
+
+groups:
+  - name: medxray-api-alerts
+    rules:
+      # High API latency
+      - alert: HighAPILatency
+        expr: histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job="medxray-api"}[5m])) by (le)) > 2
+        for: 5m
+        labels:
+          severity: warning
+          service: api
+        annotations:
+          summary: "High API latency detected"
+          description: "95th percentile API latency is above 2 seconds for 5 minutes"
+
+      # API error rate high
+      - alert: HighAPIErrorRate
+        expr: sum(rate(http_requests_total{job="medxray-api",status=~"5.."}[5m])) / sum(rate(http_requests_total{job="medxray-api"}[5m])) > 0.05
+        for: 2m
+        labels:
+          severity: critical
+          service: api
+        annotations:
+          summary: "High API error rate"
+          description: "API error rate is above 5% for 2 minutes"
+
+      # API down
+      - alert: APIDown
+        expr: up{job="medxray-api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: api
+        annotations:
+          summary: "API service is down"
+          description: "MedXrayChat API has been down for more than 1 minute"
+
+  - name: medxray-ai-alerts
+    rules:
+      # AI inference errors
+      - alert: AIInferenceErrors
+        expr: rate(ai_inference_errors_total[5m]) > 0.1
+        for: 2m
+        labels:
+          severity: critical
+          service: ai
+        annotations:
+          summary: "AI inference error rate high"
+          description: "AI model inference error rate exceeds 10%"
+
+      # AI inference slow
+      - alert: AIInferenceSlow
+        expr: histogram_quantile(0.95, sum(rate(ai_inference_duration_seconds_bucket[5m])) by (le)) > 30
+        for: 5m
+        labels:
+          severity: warning
+          service: ai
+        annotations:
+          summary: "AI inference is slow"
+          description: "95th percentile AI inference time exceeds 30 seconds"
+
+      # GPU memory high
+      - alert: GPUMemoryHigh
+        expr: nvidia_gpu_memory_used_bytes / nvidia_gpu_memory_total_bytes > 0.9
+        for: 5m
+        labels:
+          severity: warning
+          service: ai
+        annotations:
+          summary: "GPU memory usage high"
+          description: "GPU memory usage is above 90%"
+
+  - name: medxray-database-alerts
+    rules:
+      # Database connections high
+      - alert: DatabaseConnectionsHigh
+        expr: pg_stat_activity_count > 90
+        for: 2m
+        labels:
+          severity: warning
+          service: database
+        annotations:
+          summary: "Database connections high"
+          description: "PostgreSQL active connections above 90"
+
+      # Database down
+      - alert: DatabaseDown
+        expr: pg_up == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: database
+        annotations:
+          summary: "Database is down"
+          description: "PostgreSQL database has been down for more than 1 minute"
+
+      # Database slow queries
+      - alert: DatabaseSlowQueries
+        expr: rate(pg_stat_activity_max_tx_duration[5m]) > 30
+        for: 5m
+        labels:
+          severity: warning
+          service: database
+        annotations:
+          summary: "Slow database queries detected"
+          description: "Long-running database transactions detected"
+
+  - name: medxray-redis-alerts
+    rules:
+      # Redis down
+      - alert: RedisDown
+        expr: redis_up == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: redis
+        annotations:
+          summary: "Redis is down"
+          description: "Redis cache has been down for more than 1 minute"
+
+      # Redis memory high
+      - alert: RedisMemoryHigh
+        expr: redis_memory_used_bytes / redis_memory_max_bytes > 0.9
+        for: 5m
+        labels:
+          severity: warning
+          service: redis
+        annotations:
+          summary: "Redis memory usage high"
+          description: "Redis memory usage is above 90%"
+
+  - name: medxray-infrastructure-alerts
+    rules:
+      # High CPU usage
+      - alert: HighCPUUsage
+        expr: 100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 80
+        for: 5m
+        labels:
+          severity: warning
+          service: infrastructure
+        annotations:
+          summary: "High CPU usage"
+          description: "CPU usage is above 80% for 5 minutes"
+
+      # High memory usage
+      - alert: HighMemoryUsage
+        expr: (node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes) / node_memory_MemTotal_bytes > 0.9
+        for: 5m
+        labels:
+          severity: warning
+          service: infrastructure
+        annotations:
+          summary: "High memory usage"
+          description: "Memory usage is above 90%"
+
+      # Disk space low
+      - alert: DiskSpaceLow
+        expr: (node_filesystem_avail_bytes{fstype!="tmpfs"} / node_filesystem_size_bytes{fstype!="tmpfs"}) < 0.1
+        for: 5m
+        labels:
+          severity: critical
+          service: infrastructure
+        annotations:
+          summary: "Disk space low"
+          description: "Disk space is below 10%"
+
+  - name: medxray-business-alerts
+    rules:
+      # No studies uploaded
+      - alert: NoStudiesUploaded
+        expr: increase(studies_created_total[1h]) == 0
+        for: 2h
+        labels:
+          severity: info
+          service: business
+        annotations:
+          summary: "No studies uploaded"
+          description: "No new studies have been uploaded in the last 2 hours during business hours"
+
+      # High analysis queue
+      - alert: HighAnalysisQueue
+        expr: analysis_queue_size > 100
+        for: 10m
+        labels:
+          severity: warning
+          service: business
+        annotations:
+          summary: "Analysis queue is large"
+          description: "More than 100 analyses are queued"

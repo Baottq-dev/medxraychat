@@ -1,0 +1,59 @@
+# MedXrayChat - Development Docker Compose  
+# For local development WITHOUT GPU (AI calls will fail gracefully)
+
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: medxraychat-db-dev
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: medxray
+      POSTGRES_PASSWORD: medxray_dev
+      POSTGRES_DB: medxraychat
+    volumes:
+      - postgres_dev_data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U medxray"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - medxray-dev
+
+  # Redis for caching
+  redis:
+    image: redis:7-alpine
+    container_name: medxraychat-redis-dev
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    networks:
+      - medxray-dev
+
+  # pgAdmin for database management (development only)
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: medxraychat-pgadmin-dev
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@medxray.local
+      PGADMIN_DEFAULT_PASSWORD: admin123
+    ports:
+      - "5050:80"
+    depends_on:
+      - postgres
+    networks:
+      - medxray-dev
+
+volumes:
+  postgres_dev_data:
+
+networks:
+  medxray-dev:
+    driver: bridge

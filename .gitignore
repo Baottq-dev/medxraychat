@@ -1,0 +1,282 @@
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv/
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+pytest_cache/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# =========================
+# Node.js / Next.js
+# =========================
+node_modules/
+.pnp
+.pnp.js
+.next/
+out/
+build/
+dist/
+coverage/
+.turbo
+
+# Yarn
+.yarn-integrity
+yarn-error.log*
+yarn-debug.log*
+
+# npm
+npm-debug.log*
+.npm
+
+# =========================
+# Environment & Secrets
+# =========================
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.env*.local
+*.pem
+secrets/
+credentials/
+
+# =========================
+# IDE & Editors
+# =========================
+.idea/
+.vscode/
+*.swp
+*.swo
+*.sublime-workspace
+*.sublime-project
+.project
+.classpath
+.settings/
+
+# =========================
+# OS Generated
+# =========================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+nul
+
+# =========================
+# ML / Deep Learning
+# =========================
+# Model weights (keep in weights/ but ignore large files)
+*.pt
+*.pth
+*.onnx
+*.h5
+*.hdf5
+*.pkl
+*.joblib
+*.safetensors
+
+# Keep weight folder structure
+!weights/.gitkeep
+!weights/**/.gitkeep
+
+# Training outputs
+runs/
+outputs/
+logs/
+wandb/
+mlruns/
+lightning_logs/
+
+# =========================
+# Data & Uploads
+# =========================
+# Large dataset files
+datasets/VinDR-CXR/train/
+datasets/VinDR-CXR/test/
+datasets/VinDR-CXR/annotations/
+*.dcm
+*.dicom
+
+# Uploads
+apps/api/uploads/*
+!apps/api/uploads/.gitkeep
+
+# =========================
+# Docker
+# =========================
+*.log
+docker-compose.override.yml
+
+# =========================
+# Misc
+# =========================
+*.bak
+*.tmp
+*.temp
+.cache/
+tmp/
+temp/
+
+# TypeScript
+*.tsbuildinfo
+
+# Vercel
+.vercel
+
+# =========================
+# Project Specific
+# =========================
+# Backup folder (if contains sensitive data)
+backup/
+
+# Weights folder - large model files
+weights/
+
+# Translation folder - processed data
+translate/
+
+# Finetune folder - training completed
+Finetune/
+
+# docs build
+docs/
+
+# data folder - large datasets
+datasets/
+
+# Keep important config files
+!.editorconfig
+!.pre-commit-config.yaml
+
+# YOLO specific
+*.cache
+yolo/runs/
+ml/yolo/runs/
+Finetune/yolo/runs/
+
+# Qwen / LLM specific
+ml/qwen/outputs/
+Finetune/Qwen/outputs/
+*.bin
+
+# Translation cache/temp
+translate/*.tmp
+translate/temp/
+
+# Weights - ignore large model files but keep structure
+weights/**/*.pt
+weights/**/*.pth
+weights/**/*.onnx
+weights/**/*.safetensors
+weights/**/*.bin
+!weights/**/.gitkeep
+
+# Large image/video files
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.zip
+*.tar
+*.tar.gz
+*.rar
+*.7z
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# PostgreSQL data
+postgres-data/
+pgdata/
+
+# Redis
+dump.rdb
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Ruff
+.ruff_cache/
+
+# pnpm
+pnpm-lock.yaml
+.pnpm-store/
+
+# ESLint
+.eslintcache
+
+# Prettier
+.prettiercache
+
+# Test artifacts
+test-results/
+playwright-report/
+playwright/.cache/
+
+# Storybook
+storybook-static/
+
+# Claude/AI
+.claude/

@@ -1,0 +1,119 @@
+# Alertmanager Configuration for MedXrayChat
+
+global:
+  # SMTP configuration for email alerts
+  smtp_smarthost: 'smtp.gmail.com:587'
+  smtp_from: 'alerts@medxraychat.com'
+  smtp_auth_username: '${SMTP_USERNAME}'
+  smtp_auth_password: '${SMTP_PASSWORD}'
+
+  # Slack configuration
+  slack_api_url: '${SLACK_WEBHOOK_URL}'
+
+# Templates for notifications
+templates:
+  - '/etc/alertmanager/templates/*.tmpl'
+
+# Route tree
+route:
+  # Default receiver
+  receiver: 'default-receiver'
+
+  # Group alerts by these labels
+  group_by: ['alertname', 'severity', 'service']
+
+  # Wait before sending first notification
+  group_wait: 30s
+
+  # Wait before sending updated notifications
+  group_interval: 5m
+
+  # Wait before resending
+  repeat_interval: 4h
+
+  # Child routes
+  routes:
+    # Critical alerts - immediate notification
+    - match:
+        severity: critical
+      receiver: 'critical-receiver'
+      group_wait: 10s
+      repeat_interval: 1h
+
+    # Warning alerts
+    - match:
+        severity: warning
+      receiver: 'warning-receiver'
+      group_wait: 1m
+      repeat_interval: 4h
+
+    # AI service alerts
+    - match:
+        service: ai
+      receiver: 'ai-team-receiver'
+
+    # Database alerts
+    - match:
+        service: database
+      receiver: 'database-receiver'
+
+# Inhibition rules
+inhibit_rules:
+  # If critical alert is firing, suppress warning alerts for same service
+  - source_match:
+      severity: 'critical'
+    target_match:
+      severity: 'warning'
+    equal: ['service', 'alertname']
+
+# Receivers
+receivers:
+  # Default receiver
+  - name: 'default-receiver'
+    email_configs:
+      - to: 'ops-team@medxraychat.com'
+        send_resolved: true
+
+  # Critical alerts receiver
+  - name: 'critical-receiver'
+    email_configs:
+      - to: 'oncall@medxraychat.com'
+        send_resolved: true
+    slack_configs:
+      - channel: '#alerts-critical'
+        send_resolved: true
+        title: '{{ .Status | toUpper }}: {{ .CommonLabels.alertname }}'
+        text: >-
+          *Alert:* {{ .CommonLabels.alertname }}
+          *Severity:* {{ .CommonLabels.severity }}
+          *Service:* {{ .CommonLabels.service }}
+          *Description:* {{ .CommonAnnotations.description }}
+
+  # Warning alerts receiver
+  - name: 'warning-receiver'
+    slack_configs:
+      - channel: '#alerts-warning'
+        send_resolved: true
+        title: '{{ .Status | toUpper }}: {{ .CommonLabels.alertname }}'
+        text: >-
+          *Alert:* {{ .CommonLabels.alertname }}
+          *Severity:* {{ .CommonLabels.severity }}
+          *Description:* {{ .CommonAnnotations.description }}
+
+  # AI team receiver
+  - name: 'ai-team-receiver'
+    email_configs:
+      - to: 'ai-team@medxraychat.com'
+        send_resolved: true
+    slack_configs:
+      - channel: '#ai-alerts'
+        send_resolved: true
+
+  # Database team receiver
+  - name: 'database-receiver'
+    email_configs:
+      - to: 'dba@medxraychat.com'
+        send_resolved: true
+    slack_configs:
+      - channel: '#database-alerts'
+        send_resolved: true
