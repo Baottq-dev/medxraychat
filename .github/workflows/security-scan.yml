@@ -84,7 +84,7 @@ jobs:
 
       - name: Build API image for scanning
         run: |
-          docker build -f infra/docker/Dockerfile.backend -t medxray-api:scan .
+          docker build -f docker/Dockerfile.backend -t medxray-api:scan .
 
       - name: Run Trivy on API image
         uses: aquasecurity/trivy-action@master
@@ -96,7 +96,7 @@ jobs:
 
       - name: Build Web image for scanning
         run: |
-          docker build -f infra/docker/Dockerfile.frontend -t medxray-web:scan .
+          docker build -f docker/Dockerfile.frontend -t medxray-web:scan .
 
       - name: Run Trivy on Web image
         uses: aquasecurity/trivy-action@master
