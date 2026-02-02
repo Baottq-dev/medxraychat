@@ -3,9 +3,11 @@ MedXrayChat Backend - Chat Endpoints with WebSocket
 """
 import uuid
 import asyncio
+import json
 from functools import partial
-from typing import List, Optional
-from fastapi import APIRouter, HTTPException, status, WebSocket, WebSocketDisconnect, Query
+from typing import List, Optional, AsyncGenerator
+from fastapi import APIRouter, HTTPException, status, WebSocket, WebSocketDisconnect, Query, Request
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select, func
 from pathlib import Path
 from loguru import logger
@@ -24,6 +26,11 @@ from services.executor import get_executor
 from core.database import async_session_maker
 from core.security import decode_access_token
 from core.image_utils import load_image_from_file
+from core.streaming import (
+    StreamingSession,
+    create_sse_response_headers,
+    run_sync_generator_async,
+)
 
 
 router = APIRouter(prefix="/chat", tags=["Chat"])
@@ -262,8 +269,198 @@ async def send_chat_message(
     db.add(ai_message)
     await db.commit()
     await db.refresh(ai_message)
-    
+
     return ai_message
+
+
+@router.post("/sessions/{session_id}/messages/stream")
+async def send_chat_message_stream(
+    session_id: uuid.UUID,
+    message_in: ChatMessageCreate,
+    current_user: CurrentUser,
+    db: DbSession,
+    request: Request,
+):
+    """Send a message and get streaming AI response (SSE).
+
+    Implements OpenAI/Anthropic-style streaming with structured events:
+    - message_start: Initial message metadata
+    - content_block_start: Start of content (text/detections)
+    - content_block_delta: Incremental content updates
+    - content_block_stop: End of content block
+    - message_delta: Usage statistics
+    - message_stop: Final message with metadata
+    - ping: Heartbeat for proxy compatibility
+    - error: Error information
+    """
+    # Verify session ownership
+    session_result = await db.execute(
+        select(ChatSession).where(ChatSession.id == session_id, ChatSession.user_id == current_user.id)
+    )
+    session = session_result.scalar_one_or_none()
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Chat session not found"
+        )
+
+    # Save user message
+    user_message = ChatMessage(
+        session_id=session_id,
+        role="user",
+        content=message_in.content,
+        image_id=message_in.image_id,
+    )
+    db.add(user_message)
+    await db.commit()
+
+    # Load image if provided
+    image = None
+    if message_in.image_id:
+        image_result = await db.execute(
+            select(Image).where(Image.id == message_in.image_id)
+        )
+        image_record = image_result.scalar_one_or_none()
+        if image_record and Path(image_record.file_path).exists():
+            image = load_image_from_file(image_record.file_path)
+
+    # Get chat history
+    history_result = await db.execute(
+        select(ChatMessage)
+        .where(ChatMessage.session_id == session_id)
+        .order_by(ChatMessage.created_at)
+    )
+    history = [
+        {"role": msg.role, "content": msg.content}
+        for msg in history_result.scalars().all()
+    ]
+
+    # Create streaming session
+    stream_session = StreamingSession(
+        session_id=str(session_id),
+        heartbeat_interval=15.0,
+        timeout=300.0,
+    )
+    ai_service = get_ai_service()
+
+    async def generate_professional_stream() -> AsyncGenerator[str, None]:
+        """Generate professional SSE stream with structured events."""
+        full_response = []
+        detections = []
+        token_count = 0
+
+        try:
+            await stream_session.start()
+
+            # Emit message_start
+            await stream_session.emit_message_start({
+                "model": "qwen-vl",
+                "user_id": str(current_user.id),
+            })
+
+            # Run YOLO and get stream in executor
+            loop = asyncio.get_event_loop()
+            stream, detections = await loop.run_in_executor(
+                get_executor(),
+                partial(
+                    ai_service.chat_stream,
+                    message=message_in.content,
+                    image=image,
+                    chat_history=history[:-1],
+                    include_detections=True,
+                )
+            )
+
+            # Content block 0: Detections (if any)
+            if detections:
+                logger.info(f"AI Stream - YOLO detections: {len(detections)}")
+                await stream_session.emit_content_start(0, "detections", {
+                    "count": len(detections)
+                })
+                # Send all detections as one delta
+                det_json = json.dumps([d.model_dump() for d in detections], ensure_ascii=False)
+                await stream_session.emit_content_delta(0, det_json, "detections_delta")
+                await stream_session.emit_content_stop(0)
+
+            # Content block 1: Text response
+            await stream_session.emit_content_start(1, "text")
+
+            # Stream text chunks - check for client disconnect
+            for chunk in stream:
+                # Check if client disconnected
+                if await request.is_disconnected():
+                    logger.info(f"Client disconnected, stopping stream for session {session_id}")
+                    break
+
+                full_response.append(chunk)
+                token_count += len(chunk) // 4  # Rough token estimate
+                await stream_session.emit_content_delta(1, chunk, "text_delta")
+
+                # Yield events from queue
+                while not stream_session.queue.empty():
+                    event = await stream_session.queue.get()
+                    if event:
+                        yield event.to_sse()
+
+            await stream_session.emit_content_stop(1)
+
+            # Emit remaining events
+            while not stream_session.queue.empty():
+                event = await stream_session.queue.get()
+                if event:
+                    yield event.to_sse()
+
+            # Save complete response to database
+            response_text = "".join(full_response)
+            async with async_session_maker() as save_db:
+                ai_message = ChatMessage(
+                    session_id=session_id,
+                    role="assistant",
+                    content=response_text,
+                    bbox_references=[d.model_dump() for d in detections],
+                    tokens_used=token_count,
+                )
+                save_db.add(ai_message)
+                await save_db.commit()
+                await save_db.refresh(ai_message)
+
+                # Emit message_delta with usage
+                await stream_session.emit_message_delta({
+                    "input_tokens": len(message_in.content) // 4,
+                    "output_tokens": token_count,
+                    "total_tokens": token_count + len(message_in.content) // 4,
+                })
+
+                # Emit message_stop with final data
+                await stream_session.emit_message_stop({
+                    "message_id": str(ai_message.id),
+                    "detections_count": len(detections),
+                })
+
+            # Yield final events
+            while not stream_session.queue.empty():
+                event = await stream_session.queue.get()
+                if event:
+                    yield event.to_sse()
+
+        except Exception as e:
+            logger.error(f"Streaming error: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            await stream_session.emit_error(str(e), "stream_error")
+            while not stream_session.queue.empty():
+                event = await stream_session.queue.get()
+                if event:
+                    yield event.to_sse()
+
+        finally:
+            await stream_session.stop()
+
+    return StreamingResponse(
+        generate_professional_stream(),
+        media_type="text/event-stream",
+        headers=create_sse_response_headers(),
+    )
 
 
 @router.websocket("/ws/{session_id}")
