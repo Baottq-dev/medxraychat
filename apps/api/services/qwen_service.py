@@ -1,5 +1,5 @@
 """
-MedXrayChat Backend - Qwen3-VL Service
+MedXrayChat Backend - Qwen3-VL Service with Tool Calling Support
 """
 import time
 import threading
@@ -12,6 +12,7 @@ from loguru import logger
 
 from schemas import Detection, BoundingBox
 from core.config import settings
+from services.tools import get_tools_description, format_tool_call_instruction
 
 
 # System prompt for medical X-ray analysis
@@ -52,6 +53,45 @@ Khi trả lời, hãy:
 - Mô tả chi tiết vị trí và đặc điểm tổn thương
 - Đề xuất chẩn đoán phân biệt nếu phù hợp
 - Luôn nhắc rằng đây chỉ là gợi ý, quyết định cuối cùng thuộc về bác sĩ
+"""
+
+
+# System prompt for tool-aware chat (function calling)
+TOOL_SYSTEM_PROMPT = """Bạn là trợ lý AI y tế hỗ trợ bác sĩ phân tích X-quang ngực.
+
+## Available Tools
+Bạn có thể sử dụng các công cụ sau khi CẦN THIẾT:
+
+1. **analyze_xray**: Phân tích ảnh X-quang để phát hiện bất thường
+   - Dùng khi: user yêu cầu "phân tích", "detect", "tìm bất thường", "chẩn đoán", "xem có gì không", "kiểm tra ảnh"
+   - KHÔNG dùng khi: user chào hỏi, hỏi thông tin chung, hoặc hỏi về kết quả ĐÃ CÓ trong context
+
+2. **explain_finding**: Giải thích chi tiết về một bất thường
+   - Dùng khi: user hỏi "X là gì?", "giải thích về Y", "nguyên nhân của Z", "Y có nguy hiểm không?"
+
+3. **generate_report**: Tạo báo cáo chẩn đoán
+   - Dùng khi: user yêu cầu "tạo báo cáo", "xuất report", "viết kết luận", "tổng hợp kết quả"
+
+## Kết quả phân tích đã có (nếu có):
+{existing_detections}
+
+## Response Format
+- Nếu CẦN sử dụng tool, trả về CHÍNH XÁC format JSON (không có text khác):
+  {{"tool_call": {{"name": "tool_name", "args": {{}}}}}}
+
+- Nếu KHÔNG cần tool, trả lời bình thường bằng text tiếng Việt.
+
+## Important Rules
+- CHỈ gọi tool khi user THỰC SỰ yêu cầu hành động đó
+- Nếu đã có kết quả phân tích trong context, THAM KHẢO kết quả đó thay vì gọi analyze_xray lại
+- Với câu hỏi đơn giản, chào hỏi, hoặc follow-up questions → trả lời trực tiếp, KHÔNG gọi tool
+- Khi không chắc chắn cần tool hay không → trả lời trực tiếp
+
+## Examples
+User: "Xin chào" → Trả lời: "Xin chào! Tôi là trợ lý AI..."
+User: "Phân tích ảnh này" → {{"tool_call": {{"name": "analyze_xray", "args": {{}}}}}}
+User: "Cardiomegaly là gì?" → {{"tool_call": {{"name": "explain_finding", "args": {{"finding_name": "Cardiomegaly"}}}}}}
+User: "Còn gì khác không?" (sau khi đã phân tích) → Trả lời dựa trên context
 """
 
 
@@ -528,6 +568,266 @@ class QwenVLService:
             logger.error(traceback.format_exc())
             self._clear_gpu_memory()
             yield "Lỗi xử lý. Vui lòng thử lại."
+
+    # ==================== Tool Calling Methods ====================
+
+    def chat_for_tool_decision(
+        self,
+        message: str,
+        image: Optional[Image.Image] = None,
+        chat_history: Optional[List[dict]] = None,
+        existing_detections: Optional[List[Detection]] = None,
+    ) -> Tuple[str, int]:
+        """Let Qwen decide whether to call a tool or respond directly.
+
+        Args:
+            message: User message
+            image: Optional image context
+            chat_history: Previous chat messages
+            existing_detections: Detections already available in session
+
+        Returns:
+            Tuple of (response text or tool call JSON, tokens used)
+        """
+        # Format existing detections for context
+        det_text = "Chưa có kết quả phân tích."
+        if existing_detections and len(existing_detections) > 0:
+            det_text = self._format_detections_text(existing_detections)
+
+        system_prompt = TOOL_SYSTEM_PROMPT.format(existing_detections=det_text)
+
+        messages = [{"role": "system", "content": system_prompt}]
+
+        # Add recent chat history for context (limit to last 6 messages)
+        if chat_history:
+            messages.extend(chat_history[-6:])
+
+        messages.append({"role": "user", "content": message})
+
+        # Use shorter max_tokens for decision (we only need JSON or short response)
+        return self.chat(messages, image, max_new_tokens=256)
+
+    def chat_stream_simple(
+        self,
+        message: str,
+        image: Optional[Image.Image] = None,
+        chat_history: Optional[List[dict]] = None,
+    ) -> Generator[str, None, None]:
+        """Simple chat stream without tool awareness (direct response).
+
+        Args:
+            message: User message
+            image: Optional image context
+            chat_history: Previous chat messages
+
+        Yields:
+            Response text chunks
+        """
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+        if chat_history:
+            messages.extend(chat_history[-6:])
+
+        messages.append({"role": "user", "content": message})
+
+        return self.chat_stream(messages, image)
+
+    def summarize_with_detections(
+        self,
+        original_message: str,
+        image: Optional[Image.Image],
+        detections: List[Detection],
+        chat_history: Optional[List[dict]] = None,
+    ) -> Tuple[str, int]:
+        """Summarize analysis results after YOLO detection.
+
+        Args:
+            original_message: Original user question
+            image: The X-ray image
+            detections: YOLO detection results
+            chat_history: Previous chat messages
+
+        Returns:
+            Tuple of (summary text, tokens used)
+        """
+        det_text = self._format_detections_text(detections)
+
+        prompt = f"""Dựa trên kết quả phân tích AI:
+
+{det_text}
+
+Câu hỏi của bác sĩ: {original_message}
+
+Hãy trả lời chi tiết bằng tiếng Việt:
+1. Mô tả các bất thường phát hiện được
+2. Vị trí và đặc điểm của từng bất thường
+3. Đưa ra nhận định tổng quát
+4. Lưu ý: Đây chỉ là gợi ý, quyết định cuối cùng thuộc về bác sĩ"""
+
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+        if chat_history:
+            messages.extend(chat_history[-4:])
+
+        messages.append({"role": "user", "content": prompt})
+
+        return self.chat(messages, image)
+
+    def summarize_with_detections_stream(
+        self,
+        original_message: str,
+        image: Optional[Image.Image],
+        detections: List[Detection],
+        chat_history: Optional[List[dict]] = None,
+    ) -> Generator[str, None, None]:
+        """Stream version of summarize_with_detections.
+
+        Args:
+            original_message: Original user question
+            image: The X-ray image
+            detections: YOLO detection results
+            chat_history: Previous chat messages
+
+        Yields:
+            Response text chunks
+        """
+        det_text = self._format_detections_text(detections)
+
+        prompt = f"""Dựa trên kết quả phân tích AI:
+
+{det_text}
+
+Câu hỏi của bác sĩ: {original_message}
+
+Hãy trả lời chi tiết bằng tiếng Việt, mô tả các bất thường và đưa ra nhận định."""
+
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+        if chat_history:
+            messages.extend(chat_history[-4:])
+
+        messages.append({"role": "user", "content": prompt})
+
+        return self.chat_stream(messages, image)
+
+    def explain_finding_stream(
+        self,
+        finding_name: str,
+        include_treatment: bool = False,
+    ) -> Generator[str, None, None]:
+        """Stream explanation about a specific finding.
+
+        Args:
+            finding_name: Name of the finding to explain
+            include_treatment: Whether to include treatment info
+
+        Yields:
+            Explanation text chunks
+        """
+        treatment_section = "5. Phương pháp điều trị phổ biến" if include_treatment else ""
+
+        prompt = f"""Giải thích chi tiết về bất thường X-quang ngực: **{finding_name}**
+
+Bao gồm các nội dung sau:
+1. Định nghĩa và mô tả
+2. Nguyên nhân phổ biến
+3. Đặc điểm nhận dạng trên X-quang
+4. Mức độ nghiêm trọng và tiên lượng
+{treatment_section}
+
+Trả lời bằng tiếng Việt, sử dụng ngôn ngữ y khoa chuyên nghiệp nhưng dễ hiểu.
+Lưu ý: Đây chỉ là thông tin tham khảo, không thay thế tư vấn y khoa."""
+
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": prompt}
+        ]
+
+        return self.chat_stream(messages, None)
+
+    def generate_report_stream(
+        self,
+        detections: List[Detection],
+        format: str = "standard",
+        include_recommendations: bool = True,
+    ) -> Generator[str, None, None]:
+        """Stream generation of diagnosis report.
+
+        Args:
+            detections: Detection results to include in report
+            format: Report format (standard, detailed, summary)
+            include_recommendations: Whether to include recommendations
+
+        Yields:
+            Report text chunks
+        """
+        det_text = self._format_detections_text(detections)
+
+        format_instructions = {
+            "standard": "Viết báo cáo chuẩn với đầy đủ các mục",
+            "detailed": "Viết báo cáo chi tiết, mô tả kỹ từng bất thường",
+            "summary": "Viết báo cáo tóm tắt, ngắn gọn súc tích"
+        }
+
+        rec_section = """4. KHUYẾN NGHỊ
+   - Đề xuất xét nghiệm bổ sung (nếu cần)
+   - Hướng theo dõi""" if include_recommendations else ""
+
+        prompt = f"""Tạo báo cáo chẩn đoán X-quang ngực.
+
+**Kết quả phân tích AI:**
+{det_text}
+
+**Yêu cầu:** {format_instructions.get(format, format_instructions["standard"])}
+
+**Cấu trúc báo cáo:**
+1. KỸ THUẬT CHỤP
+   - Tư thế: Thẳng (PA/AP)
+   - Chất lượng ảnh
+
+2. MÔ TẢ HÌNH ẢNH
+   - Phổi
+   - Tim và mạch máu lớn
+   - Xương và mô mềm
+   - Các bất thường phát hiện
+
+3. KẾT LUẬN
+   - Tổng hợp các phát hiện chính
+   - Chẩn đoán gợi ý
+
+{rec_section}
+
+Sử dụng ngôn ngữ y khoa chuyên nghiệp bằng tiếng Việt.
+Lưu ý cuối: "Đây là báo cáo hỗ trợ AI, cần được bác sĩ xác nhận trước khi sử dụng chính thức."
+"""
+
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": prompt}
+        ]
+
+        return self.chat_stream(messages, None)
+
+    def _format_detections_text(self, detections: List[Detection]) -> str:
+        """Format detections list to readable text.
+
+        Args:
+            detections: List of Detection objects
+
+        Returns:
+            Formatted string describing all detections
+        """
+        if not detections:
+            return "Không phát hiện bất thường đáng kể."
+
+        lines = []
+        for i, det in enumerate(detections, 1):
+            lines.append(
+                f"{i}. **{det.class_name}** (độ tin cậy: {det.confidence:.1%})\n"
+                f"   - Vị trí: [{det.bbox.x1:.0f}, {det.bbox.y1:.0f}] → [{det.bbox.x2:.0f}, {det.bbox.y2:.0f}]"
+            )
+
+        return "\n".join(lines)
 
 
 # Global singleton instance

@@ -36,6 +36,39 @@ from core.streaming import (
 router = APIRouter(prefix="/chat", tags=["Chat"])
 
 
+async def get_session_detections(session_id: uuid.UUID, db) -> List:
+    """Get most recent detections from a chat session.
+
+    Args:
+        session_id: Chat session ID
+        db: Database session
+
+    Returns:
+        List of Detection objects from most recent AI message with detections
+    """
+    from schemas import Detection
+
+    result = await db.execute(
+        select(ChatMessage)
+        .where(
+            ChatMessage.session_id == session_id,
+            ChatMessage.role == "assistant",
+            ChatMessage.bbox_references != None,
+        )
+        .order_by(ChatMessage.created_at.desc())
+        .limit(1)
+    )
+    message = result.scalar_one_or_none()
+
+    if message and message.bbox_references:
+        try:
+            return [Detection(**d) for d in message.bbox_references]
+        except Exception as e:
+            logger.warning(f"Failed to parse existing detections: {e}")
+            return []
+    return []
+
+
 # Connection manager for WebSocket
 class ConnectionManager:
     """Manages WebSocket connections for chat sessions."""
@@ -196,7 +229,7 @@ async def send_chat_message(
     current_user: CurrentUser,
     db: DbSession,
 ) -> ChatMessageResponse:
-    """Send a message and get AI response."""
+    """Send a message and get AI response with tool calling support."""
     # Verify session ownership
     session_result = await db.execute(
         select(ChatSession).where(ChatSession.id == session_id, ChatSession.user_id == current_user.id)
@@ -207,7 +240,7 @@ async def send_chat_message(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Chat session not found"
         )
-    
+
     # Save user message
     user_message = ChatMessage(
         session_id=session_id,
@@ -217,7 +250,7 @@ async def send_chat_message(
     )
     db.add(user_message)
     await db.commit()
-    
+
     # Load image if provided
     image = None
     if message_in.image_id:
@@ -227,7 +260,7 @@ async def send_chat_message(
         image_record = image_result.scalar_one_or_none()
         if image_record and Path(image_record.file_path).exists():
             image = load_image_from_file(image_record.file_path)
-    
+
     # Get chat history
     history_result = await db.execute(
         select(ChatMessage)
@@ -238,26 +271,31 @@ async def send_chat_message(
         {"role": msg.role, "content": msg.content}
         for msg in history_result.scalars().all()
     ]
-    
-    # Get AI response
+
+    # Get existing detections from session (for context)
+    existing_detections = await get_session_detections(session_id, db)
+
+    # Get AI response with tool calling support
     ai_service = get_ai_service()
     loop = asyncio.get_event_loop()
-    response_text, detections, tokens = await loop.run_in_executor(
+    response_text, detections, tokens, tool_call = await loop.run_in_executor(
         get_executor(),
         partial(
-            ai_service.chat,
+            ai_service.chat_with_tools,
             message=message_in.content,
             image=image,
             chat_history=history[:-1],  # Exclude current message
-            include_detections=True,
+            available_detections=existing_detections,
         )
     )
-    
-    # Log detection results for debugging
-    logger.info(f"AI Chat - YOLO detections: {len(detections)}")
+
+    # Log results for debugging
+    if tool_call:
+        logger.info(f"AI Chat - Tool called: {tool_call.name}")
+    logger.info(f"AI Chat - Detections: {len(detections)}")
     for det in detections:
         logger.info(f"  - {det.class_name}: {det.confidence:.2%}")
-    
+
     # Save AI response
     ai_message = ChatMessage(
         session_id=session_id,
@@ -281,11 +319,15 @@ async def send_chat_message_stream(
     db: DbSession,
     request: Request,
 ):
-    """Send a message and get streaming AI response (SSE).
+    """Send a message and get streaming AI response with tool calling (SSE).
 
-    Implements OpenAI/Anthropic-style streaming with structured events:
+    Implements 2-phase streaming with tool calling support:
+    - Phase 1: AI decides if tool is needed (thinking)
+    - Phase 2: Execute tool (if needed) then stream response
+
+    Event types:
     - message_start: Initial message metadata
-    - content_block_start: Start of content (text/detections)
+    - content_block_start: Start of content (thinking/tool_use/text)
     - content_block_delta: Incremental content updates
     - content_block_stop: End of content block
     - message_delta: Usage statistics
@@ -335,6 +377,9 @@ async def send_chat_message_stream(
         for msg in history_result.scalars().all()
     ]
 
+    # Get existing detections from session
+    existing_detections = await get_session_detections(session_id, db)
+
     # Create streaming session
     stream_session = StreamingSession(
         session_id=str(session_id),
@@ -343,58 +388,89 @@ async def send_chat_message_stream(
     )
     ai_service = get_ai_service()
 
-    async def generate_professional_stream() -> AsyncGenerator[str, None]:
-        """Generate professional SSE stream with structured events."""
+    async def generate_tool_aware_stream() -> AsyncGenerator[str, None]:
+        """Generate 2-phase SSE stream with tool calling support."""
         full_response = []
-        detections = []
+        final_detections = []
         token_count = 0
+        content_block_idx = 0
+        tool_was_used = False
 
         try:
             await stream_session.start()
 
             # Emit message_start
             await stream_session.emit_message_start({
-                "model": "qwen-vl",
+                "model": "qwen-vl-tools",
                 "user_id": str(current_user.id),
             })
 
-            # Run YOLO and get stream in executor
+            # Run tool-aware streaming in executor
             loop = asyncio.get_event_loop()
-            stream, detections = await loop.run_in_executor(
-                get_executor(),
-                partial(
-                    ai_service.chat_stream,
+
+            # We need to iterate over the generator in a thread-safe way
+            def run_stream_generator():
+                return list(ai_service.chat_with_tools_stream(
                     message=message_in.content,
                     image=image,
                     chat_history=history[:-1],
-                    include_detections=True,
-                )
+                    available_detections=existing_detections,
+                ))
+
+            stream_events = await loop.run_in_executor(
+                get_executor(),
+                run_stream_generator
             )
 
-            # Content block 0: Detections (if any)
-            if detections:
-                logger.info(f"AI Stream - YOLO detections: {len(detections)}")
-                await stream_session.emit_content_start(0, "detections", {
-                    "count": len(detections)
-                })
-                # Send all detections as one delta
-                det_json = json.dumps([d.model_dump() for d in detections], ensure_ascii=False)
-                await stream_session.emit_content_delta(0, det_json, "detections_delta")
-                await stream_session.emit_content_stop(0)
-
-            # Content block 1: Text response
-            await stream_session.emit_content_start(1, "text")
-
-            # Stream text chunks - check for client disconnect
-            for chunk in stream:
+            # Process stream events
+            for event_type, content, detections in stream_events:
                 # Check if client disconnected
                 if await request.is_disconnected():
                     logger.info(f"Client disconnected, stopping stream for session {session_id}")
                     break
 
-                full_response.append(chunk)
-                token_count += len(chunk) // 4  # Rough token estimate
-                await stream_session.emit_content_delta(1, chunk, "text_delta")
+                if event_type == "thinking":
+                    # Phase 1: Thinking indicator
+                    await stream_session.emit_content_start(content_block_idx, "thinking")
+                    await stream_session.emit_content_delta(content_block_idx, content, "thinking_delta")
+                    await stream_session.emit_content_stop(content_block_idx)
+                    content_block_idx += 1
+
+                elif event_type == "tool_start":
+                    # Tool execution starting
+                    tool_was_used = True
+                    await stream_session.emit_content_start(content_block_idx, "tool_use", {
+                        "status": "running"
+                    })
+                    await stream_session.emit_content_delta(content_block_idx, content, "tool_status")
+
+                elif event_type == "tool_result":
+                    # Tool finished, send detections if any
+                    if detections:
+                        final_detections = detections
+                        det_json = json.dumps([d.model_dump() for d in detections], ensure_ascii=False)
+                        await stream_session.emit_content_delta(content_block_idx, det_json, "detections_delta")
+                    await stream_session.emit_content_stop(content_block_idx)
+                    content_block_idx += 1
+
+                    # Start text content block
+                    await stream_session.emit_content_start(content_block_idx, "text")
+
+                elif event_type == "text":
+                    # Stream text response
+                    if not tool_was_used and content_block_idx == 1:
+                        # Direct response (no tool), start text block
+                        await stream_session.emit_content_start(content_block_idx, "text")
+                        tool_was_used = True  # Prevent re-emitting start
+
+                    full_response.append(content)
+                    token_count += len(content) // 4
+                    await stream_session.emit_content_delta(content_block_idx, content, "text_delta")
+
+                elif event_type == "done":
+                    # Stream finished
+                    if detections:
+                        final_detections = detections
 
                 # Yield events from queue
                 while not stream_session.queue.empty():
@@ -402,7 +478,8 @@ async def send_chat_message_stream(
                     if event:
                         yield event.to_sse()
 
-            await stream_session.emit_content_stop(1)
+            # Close text content block
+            await stream_session.emit_content_stop(content_block_idx)
 
             # Emit remaining events
             while not stream_session.queue.empty():
@@ -417,7 +494,7 @@ async def send_chat_message_stream(
                     session_id=session_id,
                     role="assistant",
                     content=response_text,
-                    bbox_references=[d.model_dump() for d in detections],
+                    bbox_references=[d.model_dump() for d in final_detections],
                     tokens_used=token_count,
                 )
                 save_db.add(ai_message)
@@ -434,7 +511,8 @@ async def send_chat_message_stream(
                 # Emit message_stop with final data
                 await stream_session.emit_message_stop({
                     "message_id": str(ai_message.id),
-                    "detections_count": len(detections),
+                    "detections_count": len(final_detections),
+                    "tool_used": tool_was_used,
                 })
 
             # Yield final events
@@ -444,7 +522,7 @@ async def send_chat_message_stream(
                     yield event.to_sse()
 
         except Exception as e:
-            logger.error(f"Streaming error: {e}")
+            logger.error(f"Tool streaming error: {e}")
             import traceback
             logger.error(traceback.format_exc())
             await stream_session.emit_error(str(e), "stream_error")
@@ -457,7 +535,7 @@ async def send_chat_message_stream(
             await stream_session.stop()
 
     return StreamingResponse(
-        generate_professional_stream(),
+        generate_tool_aware_stream(),
         media_type="text/event-stream",
         headers=create_sse_response_headers(),
     )

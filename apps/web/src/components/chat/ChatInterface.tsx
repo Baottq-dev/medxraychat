@@ -5,7 +5,7 @@ import { useChatStore, useStudyStore } from '@/stores';
 import { useWebSocket } from '@/hooks';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Send, Loader2, Bot, ImageIcon, RefreshCw, Sparkles } from 'lucide-react';
+import { Send, Loader2, Bot, ImageIcon, RefreshCw, Sparkles, Wrench, Brain } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { MessageBubble } from './MessageBubble';
 import { TypingIndicator } from './TypingIndicator';
@@ -31,6 +31,9 @@ export function ChatInterface({ sessionId, className = '' }: ChatInterfaceProps)
     isSending,
     isLoading,
     isAnalyzing,
+    isThinking,
+    toolStatus,
+    currentTool,
     sendMessage,
     fetchMessages,
     createSession,
@@ -128,6 +131,15 @@ export function ChatInterface({ sessionId, className = '' }: ChatInterfaceProps)
         {/* Typing indicator */}
         {isTyping && <TypingIndicator />}
 
+        {/* Tool status indicator (for function calling) */}
+        {(isThinking || toolStatus) && (
+          <ToolStatusIndicator
+            isThinking={isThinking}
+            toolStatus={toolStatus}
+            currentTool={currentTool}
+          />
+        )}
+
         {/* Analyzing indicator */}
         {isAnalyzing && <AnalyzingIndicator />}
 
@@ -191,6 +203,46 @@ function LoadingState() {
   return (
     <div className="flex items-center justify-center h-full">
       <Loader2 className="h-8 w-8 text-blue-500 animate-spin" />
+    </div>
+  );
+}
+
+// Tool status indicator (for function calling)
+interface ToolStatusIndicatorProps {
+  isThinking: boolean;
+  toolStatus: string | null;
+  currentTool: string | null;
+}
+
+function ToolStatusIndicator({ isThinking, toolStatus, currentTool }: ToolStatusIndicatorProps) {
+  const getIcon = () => {
+    if (isThinking) {
+      return <Brain className="h-5 w-5 text-purple-500 animate-pulse" />;
+    }
+    if (currentTool === 'tool_use') {
+      return <Wrench className="h-5 w-5 text-amber-500 animate-spin" />;
+    }
+    return <Sparkles className="h-5 w-5 text-blue-500 animate-pulse" />;
+  };
+
+  const getBackgroundColor = () => {
+    if (isThinking) return 'bg-purple-500/10';
+    if (currentTool === 'tool_use') return 'bg-amber-500/10';
+    return 'bg-blue-500/10';
+  };
+
+  const getTextColor = () => {
+    if (isThinking) return 'text-purple-400';
+    if (currentTool === 'tool_use') return 'text-amber-400';
+    return 'text-blue-400';
+  };
+
+  return (
+    <div className={cn('flex items-center gap-2 p-3 rounded-lg', getBackgroundColor())}>
+      {getIcon()}
+      <span className={getTextColor()}>
+        {toolStatus || 'Đang xử lý...'}
+      </span>
     </div>
   );
 }

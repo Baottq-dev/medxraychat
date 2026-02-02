@@ -1,7 +1,9 @@
 """
-MedXrayChat Backend - AI Orchestration Service
+MedXrayChat Backend - AI Orchestration Service with Tool Calling
 """
 import time
+import json
+import re
 from typing import List, Optional, Tuple, Generator
 from PIL import Image
 from loguru import logger
@@ -9,6 +11,7 @@ from loguru import logger
 from schemas import Detection, BoundingBox, AIAnalyzeResponse
 from services.yolo_service import get_yolo_service, YOLOService
 from services.qwen_service import get_qwen_service, QwenVLService
+from services.tools import ToolName, ToolCall
 
 
 def weighted_boxes_fusion(
@@ -287,6 +290,236 @@ class AIService:
         stream = self.qwen.chat_stream(messages, image)
 
         return stream, detections
+
+    # ==================== Tool Calling Methods ====================
+
+    def chat_with_tools(
+        self,
+        message: str,
+        image: Optional[Image.Image] = None,
+        chat_history: Optional[List[dict]] = None,
+        available_detections: Optional[List[Detection]] = None,
+    ) -> Tuple[str, List[Detection], int, Optional[ToolCall]]:
+        """Chat with tool calling support (non-streaming).
+
+        Args:
+            message: User message
+            image: Optional image context
+            chat_history: Previous chat messages
+            available_detections: Detections already available in session
+
+        Returns:
+            Tuple of (response_text, detections, tokens, tool_call or None)
+        """
+        # Step 1: Let Qwen decide if tool is needed
+        decision_response, tokens = self.qwen.chat_for_tool_decision(
+            message, image, chat_history, available_detections
+        )
+
+        # Step 2: Parse tool call from response
+        tool_call = self._parse_tool_call(decision_response)
+
+        if tool_call is None:
+            # No tool needed - return direct response
+            # But decision_response might be a direct answer, use it
+            return decision_response, [], tokens, None
+
+        # Step 3: Execute tool based on type
+        detections = []
+
+        if tool_call.name == ToolName.ANALYZE_XRAY:
+            # Run YOLO detection
+            if image is not None:
+                detections, _ = self.yolo.detect(image)
+                logger.info(f"Tool analyze_xray: {len(detections)} detections")
+
+            # Let Qwen summarize with detections
+            final_response, extra_tokens = self.qwen.summarize_with_detections(
+                message, image, detections, chat_history
+            )
+            return final_response, detections, tokens + extra_tokens, tool_call
+
+        elif tool_call.name == ToolName.EXPLAIN_FINDING:
+            finding_name = tool_call.args.get("finding_name", "")
+            include_treatment = tool_call.args.get("include_treatment", False)
+            logger.info(f"Tool explain_finding: {finding_name}")
+
+            # Stream and collect response
+            chunks = []
+            for chunk in self.qwen.explain_finding_stream(finding_name, include_treatment):
+                chunks.append(chunk)
+            explanation = "".join(chunks)
+
+            return explanation, [], tokens, tool_call
+
+        elif tool_call.name == ToolName.GENERATE_REPORT:
+            report_format = tool_call.args.get("format", "standard")
+            include_rec = tool_call.args.get("include_recommendations", True)
+            logger.info(f"Tool generate_report: format={report_format}")
+
+            # Use available detections or empty list
+            report_detections = available_detections or []
+
+            # Stream and collect response
+            chunks = []
+            for chunk in self.qwen.generate_report_stream(
+                report_detections, report_format, include_rec
+            ):
+                chunks.append(chunk)
+            report = "".join(chunks)
+
+            return report, [], tokens, tool_call
+
+        # Unknown tool - return decision response
+        return decision_response, [], tokens, None
+
+    def chat_with_tools_stream(
+        self,
+        message: str,
+        image: Optional[Image.Image] = None,
+        chat_history: Optional[List[dict]] = None,
+        available_detections: Optional[List[Detection]] = None,
+    ) -> Generator[Tuple[str, str, Optional[List[Detection]]], None, None]:
+        """2-Phase streaming chat with tool calling support.
+
+        Yields events in format: (event_type, content, detections)
+        Event types:
+        - "thinking": AI is analyzing the request
+        - "tool_start": Tool execution starting
+        - "tool_result": Tool finished, includes detections if any
+        - "text": Text chunk from response
+        - "done": Stream finished
+
+        Args:
+            message: User message
+            image: Optional image context
+            chat_history: Previous chat messages
+            available_detections: Detections already available in session
+
+        Yields:
+            Tuple of (event_type, content, detections or None)
+        """
+        # Phase 1: Qwen decides if tool is needed
+        yield ("thinking", "Đang phân tích yêu cầu...", None)
+
+        decision_response, _ = self.qwen.chat_for_tool_decision(
+            message, image, chat_history, available_detections
+        )
+
+        tool_call = self._parse_tool_call(decision_response)
+
+        if tool_call is None:
+            # No tool needed - stream direct response
+            logger.info("No tool call detected, streaming direct response")
+            for chunk in self.qwen.chat_stream_simple(message, image, chat_history):
+                yield ("text", chunk, None)
+            yield ("done", "", None)
+            return
+
+        # Phase 2: Execute tool with status updates
+        logger.info(f"Tool call detected: {tool_call.name}")
+
+        detections = []
+
+        if tool_call.name == ToolName.ANALYZE_XRAY:
+            yield ("tool_start", "Đang phân tích ảnh X-quang...", None)
+
+            # Run YOLO detection
+            if image is not None:
+                detections, yolo_time = self.yolo.detect(image)
+                logger.info(f"YOLO detection: {len(detections)} findings in {yolo_time}ms")
+
+            yield ("tool_result", f"Phát hiện {len(detections)} vùng bất thường", detections)
+
+            # Stream summarization from Qwen
+            for chunk in self.qwen.summarize_with_detections_stream(
+                message, image, detections, chat_history
+            ):
+                yield ("text", chunk, None)
+
+        elif tool_call.name == ToolName.EXPLAIN_FINDING:
+            finding_name = tool_call.args.get("finding_name", "")
+            include_treatment = tool_call.args.get("include_treatment", False)
+
+            yield ("tool_start", f"Đang tra cứu thông tin về {finding_name}...", None)
+            yield ("tool_result", "", None)
+
+            # Stream explanation
+            for chunk in self.qwen.explain_finding_stream(finding_name, include_treatment):
+                yield ("text", chunk, None)
+
+        elif tool_call.name == ToolName.GENERATE_REPORT:
+            report_format = tool_call.args.get("format", "standard")
+            include_rec = tool_call.args.get("include_recommendations", True)
+
+            yield ("tool_start", "Đang tạo báo cáo chẩn đoán...", None)
+            yield ("tool_result", "", None)
+
+            # Use available detections
+            report_detections = available_detections or []
+
+            # Stream report generation
+            for chunk in self.qwen.generate_report_stream(
+                report_detections, report_format, include_rec
+            ):
+                yield ("text", chunk, None)
+
+        yield ("done", "", detections if detections else None)
+
+    def _parse_tool_call(self, response: str) -> Optional[ToolCall]:
+        """Parse tool call from Qwen's response.
+
+        Args:
+            response: Raw response from Qwen
+
+        Returns:
+            ToolCall object if found, None otherwise
+        """
+        if not response:
+            return None
+
+        # Try multiple patterns to extract tool call JSON
+        patterns = [
+            # Full format: {"tool_call": {"name": "...", "args": {...}}}
+            r'\{\s*"tool_call"\s*:\s*(\{[^}]*"name"\s*:\s*"[^"]+?"[^}]*\})\s*\}',
+            # Simple format: {"name": "...", "args": {...}}
+            r'(\{\s*"name"\s*:\s*"[^"]+?"[^}]*\})',
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, response, re.DOTALL)
+            if match:
+                try:
+                    # Extract the matched JSON
+                    json_str = match.group(1) if "tool_call" in pattern else match.group(0)
+
+                    # Handle nested format
+                    if "tool_call" in response and "tool_call" not in json_str:
+                        # We extracted inner object, parse it directly
+                        data = json.loads(json_str)
+                    else:
+                        full_match = match.group(0)
+                        data = json.loads(full_match)
+                        if "tool_call" in data:
+                            data = data["tool_call"]
+
+                    # Validate and create ToolCall
+                    name = data.get("name", "")
+                    args = data.get("args", {})
+
+                    # Check if name is valid
+                    try:
+                        tool_name = ToolName(name)
+                        return ToolCall(name=tool_name, args=args)
+                    except ValueError:
+                        logger.warning(f"Unknown tool name: {name}")
+                        continue
+
+                except (json.JSONDecodeError, KeyError, TypeError) as e:
+                    logger.debug(f"Failed to parse tool call: {e}")
+                    continue
+
+        return None
 
 
 # Global singleton

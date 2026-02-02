@@ -21,6 +21,11 @@ interface ChatState {
   streamingContent: string;
   isStreaming: boolean;
 
+  // Tool calling states
+  isThinking: boolean;
+  toolStatus: string | null;
+  currentTool: string | null;
+
   // WebSocket
   isConnected: boolean;
 
@@ -56,6 +61,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
   isConnected: false,
   streamingContent: '',
   isStreaming: false,
+  isThinking: false,
+  toolStatus: null,
+  currentTool: null,
 
   fetchSessions: async () => {
     set({ isLoading: true, error: null });
@@ -220,7 +228,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
       throw new Error('No active session');
     }
 
-    set({ isSending: true, isStreaming: true, streamingContent: '', error: null });
+    set({
+      isSending: true,
+      isStreaming: true,
+      streamingContent: '',
+      error: null,
+      isThinking: false,
+      toolStatus: null,
+      currentTool: null,
+    });
 
     // Add user message immediately
     const userMessage: ChatMessage = {
@@ -309,18 +325,34 @@ export const useChatStore = create<ChatState>((set, get) => ({
           try {
             const data = JSON.parse(eventData);
 
-            // Handle OpenAI/Anthropic-style events
+            // Handle OpenAI/Anthropic-style events with tool calling support
             switch (data.type) {
               case 'message_start':
                 // Message started, metadata available
                 break;
 
               case 'content_block_start':
-                // New content block starting
+                // New content block starting - check block type
+                if (data.content_block?.type === 'thinking') {
+                  set({ isThinking: true, toolStatus: 'Đang phân tích yêu cầu...' });
+                } else if (data.content_block?.type === 'tool_use') {
+                  set({ isThinking: false, currentTool: 'tool_use' });
+                }
                 break;
 
               case 'content_block_delta':
-                if (data.delta?.type === 'text_delta') {
+                // Handle thinking phase
+                if (data.delta?.type === 'thinking_delta') {
+                  set({ toolStatus: data.delta.text || 'Đang suy nghĩ...' });
+                }
+                // Handle tool status updates
+                else if (data.delta?.type === 'tool_status') {
+                  set({ toolStatus: data.delta.text || 'Đang thực hiện...' });
+                }
+                // Handle text content
+                else if (data.delta?.type === 'text_delta') {
+                  // Clear thinking/tool status when text starts
+                  set({ isThinking: false, toolStatus: null, currentTool: null });
                   // Text content delta
                   accumulatedContent += data.delta.text;
                   set((state) => ({
@@ -363,7 +395,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 break;
 
               case 'content_block_stop':
-                // Content block finished
+                // Content block finished - reset thinking if it was a thinking block
+                if (get().isThinking) {
+                  set({ isThinking: false });
+                }
                 break;
 
               case 'message_delta':
@@ -382,6 +417,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
                   isStreaming: false,
                   isSending: false,
                   streamingContent: '',
+                  isThinking: false,
+                  toolStatus: null,
+                  currentTool: null,
                 }));
                 break;
 
@@ -458,6 +496,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
         isSending: false,
         isStreaming: false,
         streamingContent: '',
+        isThinking: false,
+        toolStatus: null,
+        currentTool: null,
       }));
       throw error;
     }

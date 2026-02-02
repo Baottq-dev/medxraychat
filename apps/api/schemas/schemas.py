@@ -274,3 +274,26 @@ class DashboardStatsResponse(BaseModel):
     analyses_today: int
     chat_sessions: int
     reports: int
+
+
+# ============== Tool Calling Schemas ==============
+
+class ToolCallSchema(BaseModel):
+    """Schema for a tool call from LLM."""
+    name: str
+    args: dict = {}
+
+
+class ToolCallResponse(BaseModel):
+    """Schema for tool call in chat response."""
+    tool_name: str
+    tool_args: dict = {}
+    executed: bool = False
+    result_summary: Optional[str] = None
+
+
+class ChatMessageCreateWithTools(BaseModel):
+    """Schema for creating a chat message with tool support."""
+    content: str = Field(..., min_length=1, max_length=10000)
+    image_id: Optional[uuid.UUID] = None
+    force_tool: Optional[str] = None  # Force specific tool (for testing)
