@@ -37,6 +37,9 @@ grad-cam==1.5.4
 # Qwen3-VL specific
 qwen-vl-utils==0.0.14
 
+# SSE Streaming
+sse-starlette==2.2.1
+
 # Utils
 httpx==0.28.1
 python-dotenv==1.2.1
