@@ -2,7 +2,8 @@
 MedXrayChat Backend - Qwen3-VL Service
 """
 import time
-from typing import List, Optional, Tuple
+import threading
+from typing import List, Optional, Tuple, Generator, AsyncGenerator
 from pathlib import Path
 import base64
 from io import BytesIO
@@ -426,6 +427,107 @@ class QwenVLService:
             logger.error(traceback.format_exc())
             self._clear_gpu_memory()
             return "Lỗi xử lý. Vui lòng thử lại.", 0
+
+    def chat_stream(
+        self,
+        messages: List[dict],
+        image: Optional[Image.Image] = None,
+        max_new_tokens: int = 512,
+    ) -> Generator[str, None, None]:
+        """Stream chat response token by token.
+
+        Args:
+            messages: List of chat messages [{"role": "user/assistant", "content": "..."}]
+            image: Optional image context
+            max_new_tokens: Maximum tokens to generate
+
+        Yields:
+            Response text chunks as they are generated
+        """
+        if self.model is None or self.processor is None:
+            yield "Model không sẵn sàng."
+            return
+
+        try:
+            from transformers import TextIteratorStreamer
+            import torch
+
+            # Truncate messages if too many
+            max_context_tokens = settings.QWEN_MAX_CONTEXT_TOKENS
+            truncated_messages = self._truncate_messages(messages, max_context_tokens)
+
+            # Add system prompt
+            full_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+            # Save original image reference
+            original_image = image
+            image_added = False
+
+            # Process messages
+            for msg in truncated_messages:
+                if msg["role"] == "user" and original_image is not None and not image_added:
+                    full_messages.append({
+                        "role": "user",
+                        "content": [
+                            {"type": "image", "image": original_image},
+                            {"type": "text", "text": msg["content"]}
+                        ]
+                    })
+                    image_added = True
+                else:
+                    full_messages.append(msg)
+
+            # Generate response
+            text = self.processor.apply_chat_template(
+                full_messages,
+                tokenize=False,
+                add_generation_prompt=True
+            )
+
+            images_list = [original_image] if original_image else None
+            inputs = self.processor(
+                text=[text],
+                images=images_list,
+                padding=True,
+                return_tensors="pt"
+            ).to(self.model.device)
+
+            # Setup streamer
+            streamer = TextIteratorStreamer(
+                self.processor.tokenizer,
+                skip_prompt=True,
+                skip_special_tokens=True
+            )
+
+            # Generation kwargs
+            generation_kwargs = dict(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                use_cache=True,
+                streamer=streamer,
+            )
+
+            # Run generation in separate thread
+            thread = threading.Thread(target=self.model.generate, kwargs=generation_kwargs)
+            thread.start()
+
+            # Yield tokens as they come
+            for text_chunk in streamer:
+                yield text_chunk
+
+            thread.join()
+
+            # Cleanup
+            del inputs
+            self._clear_gpu_memory()
+            logger.info("Qwen-VL streaming chat completed")
+
+        except Exception as e:
+            logger.error(f"Qwen-VL streaming chat failed: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            self._clear_gpu_memory()
+            yield "Lỗi xử lý. Vui lòng thử lại."
 
 
 # Global singleton instance
