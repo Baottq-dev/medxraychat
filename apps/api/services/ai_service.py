@@ -2,7 +2,7 @@
 MedXrayChat Backend - AI Orchestration Service
 """
 import time
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Generator
 from PIL import Image
 from loguru import logger
 
@@ -243,8 +243,50 @@ class AIService:
         
         # Get response from Qwen
         response, tokens = self.qwen.chat(messages, image)
-        
+
         return response, detections, tokens
+
+    def chat_stream(
+        self,
+        message: str,
+        image: Optional[Image.Image] = None,
+        chat_history: Optional[List[dict]] = None,
+        include_detections: bool = True,
+    ) -> Tuple[Generator[str, None, None], List[Detection]]:
+        """Stream chat response with AI about X-ray image.
+
+        Args:
+            message: User message
+            image: Optional image context
+            chat_history: Previous chat messages
+            include_detections: Whether to run YOLO and include in response
+
+        Returns:
+            Tuple of (generator yielding text chunks, relevant detections)
+        """
+        # Run YOLO if image provided and detections requested
+        detections = []
+        if image is not None and include_detections:
+            detections, _ = self.yolo.detect(image)
+
+        # Build messages for Qwen
+        messages = []
+        if chat_history:
+            messages.extend(chat_history)
+
+        # Add detection context to message if available
+        if detections:
+            det_text = "Các phát hiện từ AI:\n"
+            for i, det in enumerate(detections, 1):
+                det_text += f"- {det.class_name}: {det.confidence:.1%}\n"
+            message = f"{det_text}\n{message}"
+
+        messages.append({"role": "user", "content": message})
+
+        # Get streaming response from Qwen
+        stream = self.qwen.chat_stream(messages, image)
+
+        return stream, detections
 
 
 # Global singleton
