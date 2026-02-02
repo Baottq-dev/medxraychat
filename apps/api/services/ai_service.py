@@ -409,10 +409,17 @@ class AIService:
         tool_call = self._parse_tool_call(decision_response)
 
         if tool_call is None:
-            # No tool needed - stream direct response
-            logger.info("No tool call detected, streaming direct response")
-            for chunk in self.qwen.chat_stream_simple(message, image, chat_history):
+            # No tool needed - use decision_response directly (already a complete answer)
+            # Don't call Qwen again - that would double the latency!
+            logger.info("No tool call detected, using decision response directly")
+
+            # Stream the decision_response in chunks for consistent UX
+            # Split into reasonable chunks to simulate streaming
+            chunk_size = 20  # characters per chunk
+            for i in range(0, len(decision_response), chunk_size):
+                chunk = decision_response[i:i + chunk_size]
                 yield ("text", chunk, None)
+
             yield ("done", "", None)
             return
 
