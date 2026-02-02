@@ -406,7 +406,10 @@ async def send_chat_message_stream(
                 "user_id": str(current_user.id),
             })
 
-            # Yield message_start immediately
+            # Emit initial status so frontend knows we started
+            await stream_session.emit_status("started", "Đã nhận yêu cầu, đang bắt đầu xử lý...")
+
+            # Yield events immediately
             while not stream_session.queue.empty():
                 event = await stream_session.queue.get()
                 if event:
@@ -466,36 +469,48 @@ async def send_chat_message_stream(
                     break
 
                 if event_type == "thinking":
-                    # Phase 1: Thinking indicator
-                    await stream_session.emit_content_start(content_block_idx, "thinking")
-                    await stream_session.emit_content_delta(content_block_idx, content, "thinking_delta")
-                    await stream_session.emit_content_stop(content_block_idx)
-                    content_block_idx += 1
+                    # Phase 1: Thinking indicator - emit simple status event
+                    await stream_session.emit_status("thinking", content)
 
                 elif event_type == "tool_start":
-                    # Tool execution starting
+                    # Tool execution starting - emit status event
                     tool_was_used = True
-                    await stream_session.emit_content_start(content_block_idx, "tool_use", {
-                        "status": "running"
-                    })
-                    await stream_session.emit_content_delta(content_block_idx, content, "tool_status")
+                    await stream_session.emit_status("analyzing", content)
 
                 elif event_type == "tool_result":
-                    # Tool finished, send detections if any
+                    # Tool finished - emit status with detections info
                     if detections:
                         final_detections = detections
-                        det_json = json.dumps([d.model_dump() for d in detections], ensure_ascii=False)
-                        await stream_session.emit_content_delta(content_block_idx, det_json, "detections_delta")
-                    await stream_session.emit_content_stop(content_block_idx)
-                    content_block_idx += 1
+                        await stream_session.emit_status(
+                            "analyzed",
+                            content,
+                            {
+                                "detections_count": len(detections),
+                                "detections": [d.model_dump() for d in detections],
+                            }
+                        )
+                    else:
+                        await stream_session.emit_status("analyzed", content or "Hoàn tất phân tích")
 
-                    # Start text content block for response after tool
+                    # Now start generating text response
+                    await stream_session.emit_status("generating", "Đang tạo nội dung phản hồi...")
+
+                    # Start text content block for response
                     await stream_session.emit_content_start(content_block_idx, "text")
-                    text_block_started = True  # Mark as started to avoid duplicate
+                    text_block_started = True
 
                 elif event_type == "text":
                     # Stream text response
                     if not text_block_started:
+                        # Emit generating status for direct response (no tool was used)
+                        if not tool_was_used:
+                            await stream_session.emit_status("generating", "Đang tạo nội dung phản hồi...")
+                            # Yield status event immediately
+                            while not stream_session.queue.empty():
+                                event = await stream_session.queue.get()
+                                if event:
+                                    yield event.to_sse()
+
                         # Start text block (either after tool or for direct response)
                         await stream_session.emit_content_start(content_block_idx, "text")
                         text_block_started = True
@@ -548,6 +563,17 @@ async def send_chat_message_stream(
                     "output_tokens": token_count,
                     "total_tokens": token_count + len(message_in.content) // 4,
                 })
+
+                # Emit complete status before message_stop
+                await stream_session.emit_status(
+                    "complete",
+                    "Hoàn tất xử lý",
+                    {
+                        "message_id": str(ai_message.id),
+                        "detections_count": len(final_detections),
+                        "tokens_used": token_count,
+                    }
+                )
 
                 # Emit message_stop with final data
                 await stream_session.emit_message_stop({

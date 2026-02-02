@@ -27,6 +27,8 @@ class StreamEventType(str, Enum):
     MESSAGE_STOP = "message_stop"
     PING = "ping"
     ERROR = "error"
+    # Simple status events for frontend display
+    STATUS = "status"
 
 
 @dataclass
@@ -181,6 +183,35 @@ class StreamingSession:
                     "type": code,
                     "message": error,
                 }
+            }
+        ))
+
+    async def emit_status(
+        self,
+        status: str,
+        message: str,
+        details: Optional[dict] = None
+    ) -> None:
+        """Emit simple status event for frontend display.
+
+        This is a simpler format than content_block events,
+        designed for easy frontend consumption.
+
+        Args:
+            status: Status code (thinking, analyzing, generating, complete)
+            message: Human-readable status message
+            details: Optional additional data (e.g., detections count)
+
+        Example SSE output:
+            event: status
+            data: {"type": "status", "status": "thinking", "message": "Đang xử lý..."}
+        """
+        await self.queue.put(StreamEvent(
+            type=StreamEventType.STATUS,
+            data={
+                "status": status,
+                "message": message,
+                "details": details or {},
             }
         ))
 
