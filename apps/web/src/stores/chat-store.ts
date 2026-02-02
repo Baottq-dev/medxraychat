@@ -1,22 +1,26 @@
 import { create } from 'zustand';
 import type { ChatMessage, ChatSession, AIAnalysisResult } from '@/types';
-import { apiClient } from '@/lib/api-client';
+import { apiClient, API_BASE_URL } from '@/lib/api-client';
 
 interface ChatState {
   // Data
   sessions: ChatSession[];
   currentSession: ChatSession | null;
   messages: ChatMessage[];
-  
+
   // AI Analysis
   currentAnalysis: AIAnalysisResult | null;
   isAnalyzing: boolean;
-  
+
   // Loading states
   isLoading: boolean;
   isSending: boolean;
   error: string | null;
-  
+
+  // Streaming
+  streamingContent: string;
+  isStreaming: boolean;
+
   // WebSocket
   isConnected: boolean;
 
@@ -27,15 +31,16 @@ interface ChatState {
   setCurrentSession: (session: ChatSession | null) => void;
   fetchMessages: (sessionId: string) => Promise<void>;
   sendMessage: (content: string, imageId?: string) => Promise<void>;
+  sendMessageStream: (content: string, imageId?: string) => Promise<void>;
   addMessage: (message: ChatMessage) => void;
-  
+
   // AI Analysis
   analyzeImage: (imageId: string) => Promise<AIAnalysisResult>;
   setCurrentAnalysis: (analysis: AIAnalysisResult | null) => void;
-  
+
   // WebSocket
   setConnected: (connected: boolean) => void;
-  
+
   clearError: () => void;
 }
 
@@ -49,6 +54,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   isSending: false,
   error: null,
   isConnected: false,
+  streamingContent: '',
+  isStreaming: false,
 
   fetchSessions: async () => {
     set({ isLoading: true, error: null });
@@ -202,6 +209,255 @@ export const useChatStore = create<ChatState>((set, get) => ({
         messages: state.messages.filter((m) => m.id !== userMessage.id),
         error: error instanceof Error ? error.message : 'Failed to send message',
         isSending: false,
+      }));
+      throw error;
+    }
+  },
+
+  sendMessageStream: async (content: string, imageId?: string) => {
+    const { currentSession } = get();
+    if (!currentSession) {
+      throw new Error('No active session');
+    }
+
+    set({ isSending: true, isStreaming: true, streamingContent: '', error: null });
+
+    // Add user message immediately
+    const userMessage: ChatMessage = {
+      id: `temp-${Date.now()}`,
+      sessionId: currentSession.id,
+      role: 'user',
+      content,
+      imageId,
+      createdAt: new Date().toISOString(),
+    };
+
+    // Add placeholder for AI response
+    const aiPlaceholder: ChatMessage = {
+      id: `streaming-${Date.now()}`,
+      sessionId: currentSession.id,
+      role: 'assistant',
+      content: '',
+      createdAt: new Date().toISOString(),
+    };
+
+    set((state) => ({
+      messages: [...state.messages, userMessage, aiPlaceholder],
+    }));
+
+    try {
+      // Get auth token
+      const storage = localStorage.getItem('auth-storage');
+      let token = '';
+      if (storage) {
+        const parsed = JSON.parse(storage);
+        token = parsed.state?.tokens?.accessToken || '';
+      }
+
+      const response = await fetch(
+        `${API_BASE_URL}/chat/sessions/${currentSession.id}/messages/stream`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`,
+          },
+          body: JSON.stringify({ content, image_id: imageId }),
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error('Failed to start stream');
+      }
+
+      const reader = response.body?.getReader();
+      if (!reader) {
+        throw new Error('No response body');
+      }
+
+      const decoder = new TextDecoder();
+      let accumulatedContent = '';
+      let finalMessageId = aiPlaceholder.id;
+      let detections: any[] = [];
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const events = buffer.split('\n\n');
+        buffer = events.pop() || ''; // Keep incomplete event in buffer
+
+        for (const eventBlock of events) {
+          if (!eventBlock.trim()) continue;
+
+          const lines = eventBlock.split('\n');
+          let eventType = '';
+          let eventData = '';
+
+          for (const line of lines) {
+            if (line.startsWith('event: ')) {
+              eventType = line.slice(7);
+            } else if (line.startsWith('data: ')) {
+              eventData = line.slice(6);
+            }
+          }
+
+          if (!eventData) continue;
+
+          try {
+            const data = JSON.parse(eventData);
+
+            // Handle OpenAI/Anthropic-style events
+            switch (data.type) {
+              case 'message_start':
+                // Message started, metadata available
+                break;
+
+              case 'content_block_start':
+                // New content block starting
+                break;
+
+              case 'content_block_delta':
+                if (data.delta?.type === 'text_delta') {
+                  // Text content delta
+                  accumulatedContent += data.delta.text;
+                  set((state) => ({
+                    streamingContent: accumulatedContent,
+                    messages: state.messages.map((m) =>
+                      m.id === aiPlaceholder.id
+                        ? { ...m, content: accumulatedContent }
+                        : m
+                    ),
+                  }));
+                } else if (data.delta?.type === 'detections_delta') {
+                  // Detections data
+                  try {
+                    detections = JSON.parse(data.delta.text);
+                    const mappedDetections = detections.map((d: any, idx: number) => ({
+                      id: d.id || `det-${idx}`,
+                      classId: d.class_id ?? d.classId ?? 0,
+                      className: d.class_name ?? d.className ?? `Class ${d.class_id}`,
+                      confidence: d.confidence ?? 0,
+                      bbox: d.bbox ?? { x1: 0, y1: 0, x2: 0, y2: 0 },
+                      source: d.source ?? 'yolo',
+                    }));
+
+                    set({
+                      currentAnalysis: {
+                        id: aiPlaceholder.id,
+                        imageId: imageId || '',
+                        detections: mappedDetections,
+                        summary: '',
+                        findings: [],
+                        processingTime: 0,
+                        modelVersion: 'yolo-mff',
+                        createdAt: new Date().toISOString(),
+                      },
+                    });
+                  } catch {
+                    // Ignore parse errors for detections
+                  }
+                }
+                break;
+
+              case 'content_block_stop':
+                // Content block finished
+                break;
+
+              case 'message_delta':
+                // Usage statistics update
+                break;
+
+              case 'message_stop':
+                // Final message with ID
+                finalMessageId = data.message_id || aiPlaceholder.id;
+                set((state) => ({
+                  messages: state.messages.map((m) =>
+                    m.id === aiPlaceholder.id
+                      ? { ...m, id: finalMessageId, content: accumulatedContent, bboxReferences: detections }
+                      : m
+                  ),
+                  isStreaming: false,
+                  isSending: false,
+                  streamingContent: '',
+                }));
+                break;
+
+              case 'ping':
+                // Heartbeat - ignore
+                break;
+
+              case 'error':
+                throw new Error(data.error?.message || 'Stream error');
+
+              // Legacy format support (backward compatibility)
+              case 'chunk':
+                accumulatedContent += data.data;
+                set((state) => ({
+                  streamingContent: accumulatedContent,
+                  messages: state.messages.map((m) =>
+                    m.id === aiPlaceholder.id
+                      ? { ...m, content: accumulatedContent }
+                      : m
+                  ),
+                }));
+                break;
+
+              case 'detections':
+                detections = data.data;
+                const mappedDets = detections.map((d: any, idx: number) => ({
+                  id: d.id || `det-${idx}`,
+                  classId: d.class_id ?? d.classId ?? 0,
+                  className: d.class_name ?? d.className ?? `Class ${d.class_id}`,
+                  confidence: d.confidence ?? 0,
+                  bbox: d.bbox ?? { x1: 0, y1: 0, x2: 0, y2: 0 },
+                  source: d.source ?? 'yolo',
+                }));
+                set({
+                  currentAnalysis: {
+                    id: aiPlaceholder.id,
+                    imageId: imageId || '',
+                    detections: mappedDets,
+                    summary: '',
+                    findings: [],
+                    processingTime: 0,
+                    modelVersion: 'yolo-mff',
+                    createdAt: new Date().toISOString(),
+                  },
+                });
+                break;
+
+              case 'done':
+                finalMessageId = data.message_id;
+                set((state) => ({
+                  messages: state.messages.map((m) =>
+                    m.id === aiPlaceholder.id
+                      ? { ...m, id: finalMessageId, content: accumulatedContent, bboxReferences: detections }
+                      : m
+                  ),
+                  isStreaming: false,
+                  isSending: false,
+                  streamingContent: '',
+                }));
+                break;
+            }
+          } catch (parseError) {
+            // Ignore parse errors for incomplete JSON
+          }
+        }
+      }
+    } catch (error) {
+      // Remove failed messages
+      set((state) => ({
+        messages: state.messages.filter(
+          (m) => m.id !== userMessage.id && !m.id.startsWith('streaming-')
+        ),
+        error: error instanceof Error ? error.message : 'Failed to send message',
+        isSending: false,
+        isStreaming: false,
+        streamingContent: '',
       }));
       throw error;
     }
