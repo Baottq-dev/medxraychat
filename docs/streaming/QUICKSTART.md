@@ -173,13 +173,26 @@ class StreamingSession:
 ```typescript
 import { useState, useCallback } from 'react';
 
+type StatusCode = 'started' | 'thinking' | 'analyzing' | 'analyzed' | 'generating' | 'complete';
+
+interface Detection {
+  class_name: string;
+  confidence: number;
+  bbox: { x1: number; y1: number; x2: number; y2: number };
+}
+
 export function useStreamingChat() {
   const [content, setContent] = useState('');
+  const [status, setStatus] = useState<StatusCode | null>(null);
+  const [statusMessage, setStatusMessage] = useState('');
+  const [detections, setDetections] = useState<Detection[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
 
   const sendMessage = useCallback(async (message: string) => {
     setIsStreaming(true);
     setContent('');
+    setStatus(null);
+    setDetections([]);
 
     try {
       const response = await fetch('/api/chat/stream', {
@@ -205,6 +218,19 @@ export function useStreamingChat() {
           const dataLine = event.split('\n').find(l => l.startsWith('data: '));
           if (dataLine) {
             const data = JSON.parse(dataLine.slice(6));
+
+            // Handle status events
+            if (data.type === 'status') {
+              setStatus(data.status);
+              setStatusMessage(data.message);
+
+              // Extract detections if available
+              if (data.status === 'analyzed' && data.details?.detections) {
+                setDetections(data.details.detections);
+              }
+            }
+
+            // Handle text deltas
             if (data.delta?.text) {
               accumulated += data.delta.text;
               setContent(accumulated);
@@ -214,10 +240,59 @@ export function useStreamingChat() {
       }
     } finally {
       setIsStreaming(false);
+      setStatus(null);
     }
   }, []);
 
-  return { content, isStreaming, sendMessage };
+  return {
+    content,
+    status,
+    statusMessage,
+    detections,
+    isStreaming,
+    sendMessage
+  };
+}
+```
+
+### Using the Hook with Status Display
+
+```tsx
+function ChatComponent() {
+  const { content, status, statusMessage, detections, isStreaming, sendMessage } = useStreamingChat();
+
+  return (
+    <div>
+      {/* Status indicator */}
+      {status && (
+        <div className="status-banner">
+          {status === 'thinking' && '🤔 '}
+          {status === 'analyzing' && '🔍 '}
+          {status === 'generating' && '✍️ '}
+          {status === 'complete' && '✅ '}
+          {statusMessage}
+        </div>
+      )}
+
+      {/* Detection results */}
+      {detections.length > 0 && (
+        <div className="detections">
+          <h4>Phát hiện {detections.length} vùng bất thường:</h4>
+          <ul>
+            {detections.map((det, i) => (
+              <li key={i}>{det.class_name}: {(det.confidence * 100).toFixed(1)}%</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Streamed content */}
+      <div className="content">
+        {content}
+        {isStreaming && <span className="cursor">▌</span>}
+      </div>
+    </div>
+  );
 }
 ```
 

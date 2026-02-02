@@ -170,6 +170,79 @@ data: {
 }
 ```
 
+### 9. status (NEW)
+
+Simple status event for frontend display. Provides real-time feedback about processing stages.
+
+```json
+event: status
+data: {
+  "type": "status",
+  "status": "thinking",
+  "message": "Đang xử lý...",
+  "details": {}
+}
+```
+
+#### Status Codes
+
+| Status | Description | Example Message |
+|--------|-------------|-----------------|
+| `started` | Request received and processing started | "Đã nhận yêu cầu, đang bắt đầu xử lý..." |
+| `thinking` | AI is analyzing the request | "Đang xử lý..." |
+| `analyzing` | YOLO detection in progress | "Đang phân tích ảnh X-quang..." |
+| `analyzed` | Detection completed | "Phát hiện 3 vùng bất thường" |
+| `generating` | Text response being created | "Đang tạo nội dung phản hồi..." |
+| `complete` | All processing finished | "Hoàn tất xử lý" |
+
+#### Status with Detections
+
+When `status: "analyzed"`, the `details` field contains detection results:
+
+```json
+event: status
+data: {
+  "type": "status",
+  "status": "analyzed",
+  "message": "Phát hiện 3 vùng bất thường",
+  "details": {
+    "detections_count": 3,
+    "detections": [
+      {
+        "class_id": 3,
+        "class_name": "Cardiomegaly",
+        "confidence": 0.92,
+        "bbox": {"x1": 100, "y1": 200, "x2": 400, "y2": 500}
+      },
+      {
+        "class_id": 16,
+        "class_name": "Pleural effusion",
+        "confidence": 0.78,
+        "bbox": {"x1": 50, "y1": 300, "x2": 200, "y2": 450}
+      }
+    ]
+  }
+}
+```
+
+#### Complete Status
+
+When `status: "complete"`, the `details` field contains final metadata:
+
+```json
+event: status
+data: {
+  "type": "status",
+  "status": "complete",
+  "message": "Hoàn tất xử lý",
+  "details": {
+    "message_id": "550e8400-e29b-41d4-a716-446655440000",
+    "detections_count": 3,
+    "tokens_used": 512
+  }
+}
+```
+
 ---
 
 ## Complete Stream Example
@@ -178,44 +251,53 @@ data: {
 event: message_start
 data: {"type":"message_start","message_id":"msg-001","session_id":"sess-001","metadata":{"model":"qwen-vl"}}
 
+event: status
+data: {"type":"status","status":"started","message":"Đã nhận yêu cầu, đang bắt đầu xử lý...","details":{}}
+
+event: status
+data: {"type":"status","status":"thinking","message":"Đang xử lý...","details":{}}
+
+event: status
+data: {"type":"status","status":"analyzing","message":"Đang phân tích ảnh X-quang...","details":{}}
+
+event: status
+data: {"type":"status","status":"analyzed","message":"Phát hiện 2 vùng bất thường","details":{"detections_count":2,"detections":[{"class_name":"Cardiomegaly","confidence":0.92},{"class_name":"Pleural effusion","confidence":0.78}]}}
+
+event: status
+data: {"type":"status","status":"generating","message":"Đang tạo nội dung phản hồi...","details":{}}
+
 event: content_block_start
-data: {"type":"content_block_start","index":0,"content_type":"detections","metadata":{"count":2}}
+data: {"type":"content_block_start","index":0,"content_type":"text","metadata":{}}
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"detections_delta","text":"[{\"class_name\":\"Cardiomegaly\",\"confidence\":0.92},{\"class_name\":\"Pleural effusion\",\"confidence\":0.78}]"}}
-
-event: content_block_stop
-data: {"type":"content_block_stop","index":0}
-
-event: content_block_start
-data: {"type":"content_block_start","index":1,"content_type":"text","metadata":{}}
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"**Kết quả"}}
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"**Kết quả"}}
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" phân tích"}}
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" phân tích"}}
-
-event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" ảnh X-quang:**\n\n"}}
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" ảnh X-quang:**\n\n"}}
 
 event: ping
 data: {"type":"ping","timestamp":1706860815.5}
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Phát hiện tim to"}}
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Phát hiện tim to"}}
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" (Cardiomegaly)"}}
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" (Cardiomegaly)"}}
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" với độ tin cậy 92%."}}
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" với độ tin cậy 92%."}}
 
 event: content_block_stop
-data: {"type":"content_block_stop","index":1}
+data: {"type":"content_block_stop","index":0}
 
 event: message_delta
 data: {"type":"message_delta","usage":{"input_tokens":50,"output_tokens":128,"total_tokens":178}}
+
+event: status
+data: {"type":"status","status":"complete","message":"Hoàn tất xử lý","details":{"message_id":"msg-001","detections_count":2,"tokens_used":128}}
 
 event: message_stop
 data: {"type":"message_stop","message_id":"msg-001","stop_reason":"end_turn","usage":{"total_tokens":178,"processing_time_ms":12500},"detections_count":2}
@@ -235,7 +317,40 @@ type StreamEventType =
   | 'message_delta'
   | 'message_stop'
   | 'ping'
-  | 'error';
+  | 'error'
+  | 'status';  // NEW
+
+type StatusCode =
+  | 'started'
+  | 'thinking'
+  | 'analyzing'
+  | 'analyzed'
+  | 'generating'
+  | 'complete';
+
+interface StatusEvent {
+  type: 'status';
+  status: StatusCode;
+  message: string;
+  details: {
+    detections_count?: number;
+    detections?: Detection[];
+    message_id?: string;
+    tokens_used?: number;
+  };
+}
+
+interface Detection {
+  class_id: number;
+  class_name: string;
+  confidence: number;
+  bbox: {
+    x1: number;
+    y1: number;
+    x2: number;
+    y2: number;
+  };
+}
 
 interface MessageStartEvent {
   type: 'message_start';
@@ -306,7 +421,8 @@ type StreamEvent =
   | MessageDeltaEvent
   | MessageStopEvent
   | PingEvent
-  | ErrorEvent;
+  | ErrorEvent
+  | StatusEvent;  // NEW
 ```
 
 ---
@@ -316,7 +432,7 @@ type StreamEvent =
 ```python
 from enum import Enum
 from pydantic import BaseModel
-from typing import Optional, Dict, Any, Union
+from typing import Optional, Dict, Any, Union, List
 
 class StreamEventType(str, Enum):
     MESSAGE_START = "message_start"
@@ -327,6 +443,15 @@ class StreamEventType(str, Enum):
     MESSAGE_STOP = "message_stop"
     PING = "ping"
     ERROR = "error"
+    STATUS = "status"  # NEW
+
+class StatusCode(str, Enum):
+    STARTED = "started"
+    THINKING = "thinking"
+    ANALYZING = "analyzing"
+    ANALYZED = "analyzed"
+    GENERATING = "generating"
+    COMPLETE = "complete"
 
 class Delta(BaseModel):
     type: str  # "text_delta" or "detections_delta"

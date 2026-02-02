@@ -431,6 +431,56 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 // Heartbeat - ignore
                 break;
 
+              case 'status':
+                // Simple status events from backend for user feedback
+                console.log('[Chat] Status event:', data.status, data.message);
+                switch (data.status) {
+                  case 'started':
+                  case 'thinking':
+                    set({ isThinking: true, toolStatus: data.message });
+                    break;
+                  case 'analyzing':
+                    set({ isThinking: true, toolStatus: data.message, currentTool: 'analyze_xray' });
+                    break;
+                  case 'analyzed':
+                    // Detection completed - update detections if available
+                    if (data.details?.detections && data.details.detections.length > 0) {
+                      const mappedDetections = data.details.detections.map((d: any, idx: number) => ({
+                        id: d.id || `det-${idx}`,
+                        classId: d.class_id ?? d.classId ?? 0,
+                        className: d.class_name ?? d.className ?? `Class ${d.class_id}`,
+                        confidence: d.confidence ?? 0,
+                        bbox: d.bbox ?? { x1: 0, y1: 0, x2: 0, y2: 0 },
+                        source: d.source ?? 'yolo',
+                      }));
+                      console.log('[Chat] Status analyzed - detections:', mappedDetections.length);
+                      detections = data.details.detections;
+                      set({
+                        toolStatus: data.message,
+                        currentAnalysis: {
+                          id: aiPlaceholder.id,
+                          imageId: imageId || '',
+                          detections: mappedDetections,
+                          summary: '',
+                          findings: [],
+                          processingTime: 0,
+                          modelVersion: 'yolo-mff',
+                          createdAt: new Date().toISOString(),
+                        },
+                      });
+                    } else {
+                      set({ toolStatus: data.message });
+                    }
+                    break;
+                  case 'generating':
+                    set({ isThinking: false, toolStatus: data.message, currentTool: null });
+                    break;
+                  case 'complete':
+                    set({ isThinking: false, toolStatus: null, currentTool: null });
+                    break;
+                }
+                break;
+
               case 'error':
                 throw new Error(data.error?.message || 'Stream error');
 
