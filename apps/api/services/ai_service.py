@@ -383,13 +383,15 @@ class AIService:
         """Streaming chat with tool calling support.
 
         Flow:
-        1. Get tool decision from Qwen (short - max 256 tokens)
-        2. Parse for tool call JSON anywhere in response
-        3. If tool found → execute tool (YOLO) → stream summarization
-        4. If no tool → stream response as direct text
+        1. Emit "thinking" indicator immediately
+        2. Get tool decision from Qwen (short - max 256 tokens)
+        3. Parse for tool call JSON anywhere in response
+        4. If tool found → execute tool (YOLO) → stream summarization
+        5. If no tool → stream response as direct text
 
         Yields events in format: (event_type, content, detections)
         Event types:
+        - "thinking": Immediate feedback that AI is processing
         - "tool_start": Tool execution starting
         - "tool_result": Tool finished, includes detections if any
         - "text": Text chunk from response
@@ -404,6 +406,9 @@ class AIService:
         Yields:
             Tuple of (event_type, content, detections or None)
         """
+        # Emit thinking indicator immediately so user knows AI is working
+        yield ("thinking", "Đang xử lý...", None)
+
         # Stream tool decision and collect response
         # Tool decision is short (max 256 tokens), so we can buffer first
         # then check if it contains a tool call JSON anywhere in the response
