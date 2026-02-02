@@ -45,7 +45,12 @@ COPY apps/api/requirements.txt .
 
 # Install Python dependencies using Python 3.11
 RUN python3.11 -m pip install --no-cache-dir --upgrade pip && \
-    python3.11 -m pip install --no-cache-dir -r requirements.txt
+    python3.11 -m pip install --no-cache-dir -r requirements.txt && \
+    python3.11 -m pip install --no-cache-dir --upgrade "transformers>=4.51.0" qwen-vl-utils
+
+# Copy MFF custom modules into ultralytics package
+COPY mff_modules.py /usr/local/lib/python3.11/dist-packages/ultralytics/nn/modules/mff_modules.py
+RUN echo "from .mff_modules import FAHG, FFM_Concat, MSPLC, C3_MSLC, C3_MSLC2" >> /usr/local/lib/python3.11/site-packages/ultralytics/nn/modules/__init__.py
 
 # Copy application code
 COPY apps/api/ .

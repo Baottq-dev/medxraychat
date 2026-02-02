@@ -5,7 +5,11 @@ from torch import nn
 import torch
 import numpy as np
 
-from .block import C2f, C3
+# Import from ultralytics (works when copied into ultralytics/nn/modules/)
+try:
+    from ultralytics.nn.modules.block import C2f, C3
+except ImportError:
+    from ultralytics.nn.modules import C2f, C3
 
 __all__ = ["FAHG", "FFM_Concat", "MSPLC", "C3_MSLC", "C3_MSLC2"]
 

@@ -108,38 +108,43 @@ class QwenVLService:
         """Load Qwen-VL model and processor."""
         try:
             import torch
-            from transformers import AutoProcessor
             
             logger.info(f"Loading Qwen-VL model: {self.model_name}")
             
-            # Try loading with AutoModelForVision2Seq (works for both Qwen2.5-VL and Qwen3-VL)
+            # Try Qwen3-VL first (transformers >= 5.0), then fallback to Qwen2.5-VL
             try:
-                from transformers import Qwen2_5_VLForConditionalGeneration
+                from transformers import Qwen3VLForConditionalGeneration, Qwen3VLProcessor
+                self.model = Qwen3VLForConditionalGeneration.from_pretrained(
+                    self.model_name,
+                    torch_dtype=torch.bfloat16,
+                    device_map="auto",
+                    trust_remote_code=True,
+                    low_cpu_mem_usage=True,
+                )
+                self.processor = Qwen3VLProcessor.from_pretrained(
+                    self.model_name,
+                    trust_remote_code=True,
+                )
+            except ImportError:
+                # Fallback to Qwen2.5-VL for older transformers
+                from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
                 self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
                     self.model_name,
                     torch_dtype=torch.bfloat16,
                     device_map="auto",
                     trust_remote_code=True,
                 )
-            except (ImportError, ValueError):
-                # Fallback to AutoModel for newer versions
-                from transformers import AutoModelForVision2Seq
-                self.model = AutoModelForVision2Seq.from_pretrained(
+                self.processor = AutoProcessor.from_pretrained(
                     self.model_name,
-                    torch_dtype=torch.bfloat16,
-                    device_map="auto",
                     trust_remote_code=True,
                 )
             
-            self.processor = AutoProcessor.from_pretrained(
-                self.model_name,
-                trust_remote_code=True,
-            )
-            
-            logger.info("Qwen-VL model loaded successfully")
+            logger.info(f"Qwen-VL model loaded successfully: {type(self.model).__name__}")
             
         except Exception as e:
             logger.error(f"Failed to load Qwen-VL model: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             self.model = None
             self.processor = None
     
@@ -212,12 +217,10 @@ class QwenVLService:
                 return_tensors="pt"
             ).to(self.model.device)
             
-            # Generate response
+            # Generate response (Qwen3-VL doesn't support temperature/do_sample directly)
             generated_ids = self.model.generate(
                 **inputs,
                 max_new_tokens=max_new_tokens,
-                do_sample=True,
-                temperature=0.7,
             )
             
             # Decode response
@@ -240,6 +243,8 @@ class QwenVLService:
             
         except Exception as e:
             logger.error(f"Qwen-VL analysis failed: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             self._clear_gpu_memory()
             return "Lỗi phân tích. Vui lòng thử lại.", [], 0
     
@@ -334,49 +339,53 @@ class QwenVLService:
         max_new_tokens: int = 512,
     ) -> Tuple[str, int]:
         """Multi-turn chat with Qwen-VL.
-        
+
         Args:
             messages: List of chat messages [{"role": "user/assistant", "content": "..."}]
             image: Optional image context
             max_new_tokens: Maximum tokens to generate
-            
+
         Returns:
             Tuple of (response text, tokens used)
         """
         if self.model is None or self.processor is None:
             return "Model không sẵn sàng.", 0
-        
+
         try:
             # Truncate messages if too many to fit context window
             max_context_tokens = settings.QWEN_MAX_CONTEXT_TOKENS
             truncated_messages = self._truncate_messages(messages, max_context_tokens)
-            
+
             # Add system prompt
             full_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-            
+
+            # Save original image reference for processor
+            original_image = image
+            image_added = False
+
             # Process messages
             for msg in truncated_messages:
-                if msg["role"] == "user" and image is not None:
+                if msg["role"] == "user" and original_image is not None and not image_added:
                     # Add image to first user message
                     full_messages.append({
                         "role": "user",
                         "content": [
-                            {"type": "image", "image": image},
+                            {"type": "image", "image": original_image},
                             {"type": "text", "text": msg["content"]}
                         ]
                     })
-                    image = None  # Only add image once
+                    image_added = True  # Only add image once
                 else:
                     full_messages.append(msg)
-            
+
             # Generate response
             text = self.processor.apply_chat_template(
                 full_messages,
                 tokenize=False,
                 add_generation_prompt=True
             )
-            
-            images_list = [image] if image else None
+
+            images_list = [original_image] if original_image else None
             inputs = self.processor(
                 text=[text],
                 images=images_list,
@@ -384,28 +393,37 @@ class QwenVLService:
                 return_tensors="pt"
             ).to(self.model.device)
             
-            generated_ids = self.model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                do_sample=True,
-                temperature=0.7,
-            )
-            
+            # Generate with memory optimization
+            import torch
+            with torch.inference_mode():
+                generated_ids = self.model.generate(
+                    **inputs,
+                    max_new_tokens=max_new_tokens,
+                    use_cache=True,
+                )
+
             generated_ids_trimmed = [
-                out_ids[len(in_ids):] 
+                out_ids[len(in_ids):]
                 for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
             ]
             response = self.processor.batch_decode(
                 generated_ids_trimmed,
                 skip_special_tokens=True,
             )[0]
-            
+
             tokens_used = len(generated_ids_trimmed[0])
-            
+            logger.info(f"Qwen-VL chat completed, tokens: {tokens_used}")
+
+            # Cleanup to free GPU memory
+            del inputs, generated_ids, generated_ids_trimmed
+            self._clear_gpu_memory()
+
             return response, tokens_used
-            
+
         except Exception as e:
             logger.error(f"Qwen-VL chat failed: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             self._clear_gpu_memory()
             return "Lỗi xử lý. Vui lòng thử lại.", 0
 

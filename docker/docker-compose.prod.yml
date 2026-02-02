@@ -10,8 +10,6 @@
 #   - NVIDIA Container Toolkit installed
 #   - Qwen model weights in ../weights/qwen/
 
-version: '3.8'
-
 services:
   # PostgreSQL Database
   postgres:
@@ -79,8 +77,6 @@ services:
       - AI_DEVICE=auto
       - YOLO_MODEL_PATH=/app/weights/yolo/best.pt
       - QWEN_MODEL_NAME=/app/weights/qwen
-      # CORS
-      - CORS_ORIGINS=http://localhost:3000,http://frontend:3000,${FRONTEND_URL:-http://localhost}
     volumes:
       - uploads_data:/app/uploads
       - ../weights:/app/weights:ro
