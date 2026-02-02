@@ -380,15 +380,16 @@ class AIService:
         chat_history: Optional[List[dict]] = None,
         available_detections: Optional[List[Detection]] = None,
     ) -> Generator[Tuple[str, str, Optional[List[Detection]]], None, None]:
-        """Streaming chat with real-time tool detection.
+        """Streaming chat with tool calling support.
 
-        Uses streaming tool decision to start response immediately:
-        - If response starts with '{' → tool call JSON → execute tool
-        - If response starts with text → direct response → stream through
+        Flow:
+        1. Get tool decision from Qwen (short - max 256 tokens)
+        2. Parse for tool call JSON anywhere in response
+        3. If tool found → execute tool (YOLO) → stream summarization
+        4. If no tool → stream response as direct text
 
         Yields events in format: (event_type, content, detections)
         Event types:
-        - "thinking": AI is analyzing (only shown briefly if tool detected)
         - "tool_start": Tool execution starting
         - "tool_result": Tool finished, includes detections if any
         - "text": Text chunk from response
@@ -403,60 +404,31 @@ class AIService:
         Yields:
             Tuple of (event_type, content, detections or None)
         """
-        # Stream tool decision - response starts immediately!
+        # Stream tool decision and collect response
+        # Tool decision is short (max 256 tokens), so we can buffer first
+        # then check if it contains a tool call JSON anywhere in the response
         decision_stream = self.qwen.chat_for_tool_decision_stream(
             message, image, chat_history, available_detections
         )
 
-        # Buffer to detect if it's JSON (tool call) or text (direct response)
-        buffer = ""
-        is_json = None  # None = unknown, True = JSON, False = text
-        json_detection_chars = 10  # Check first N chars to determine type
-
+        # Collect full response first (it's short - max 256 tokens)
+        response_chunks = []
         for chunk in decision_stream:
-            buffer += chunk
+            response_chunks.append(chunk)
 
-            # Determine response type from initial characters
-            if is_json is None and len(buffer) >= json_detection_chars:
-                stripped = buffer.strip()
-                # JSON tool call starts with { or "
-                is_json = stripped.startswith('{') or stripped.startswith('"')
+        full_response = "".join(response_chunks)
+        logger.info(f"Tool decision response: {full_response[:200]}...")
 
-                if is_json:
-                    # It's a tool call - show thinking indicator
-                    logger.info("Detected tool call JSON, buffering...")
-                    yield ("thinking", "Đang xử lý yêu cầu...", None)
-                else:
-                    # It's direct text - start streaming immediately
-                    logger.info("Direct response detected, streaming...")
-                    yield ("text", buffer, None)
-                    buffer = ""  # Clear buffer, continue streaming
-
-            elif is_json is False:
-                # Continue streaming text directly
-                yield ("text", chunk, None)
-
-        # Handle remaining buffer
-        if is_json is None:
-            # Short response - check type
-            stripped = buffer.strip()
-            is_json = stripped.startswith('{') or stripped.startswith('"')
-            if not is_json:
-                # Short text response
-                yield ("text", buffer, None)
-
-        if not is_json:
-            # Direct text response - already streamed, just finish
-            yield ("done", "", None)
-            return
-
-        # is_json = True: Parse tool call from complete JSON response
-        tool_call = self._parse_tool_call(buffer)
+        # Check if response contains a tool call JSON (anywhere in the response)
+        tool_call = self._parse_tool_call(full_response)
 
         if tool_call is None:
-            # Failed to parse - treat as text
-            logger.warning(f"Failed to parse tool call, treating as text: {buffer[:100]}")
-            yield ("text", buffer, None)
+            # No tool call found - stream response as direct text
+            logger.info("No tool call detected, streaming direct response")
+            # Stream in chunks for consistent UX
+            chunk_size = 20
+            for i in range(0, len(full_response), chunk_size):
+                yield ("text", full_response[i:i + chunk_size], None)
             yield ("done", "", None)
             return
 
