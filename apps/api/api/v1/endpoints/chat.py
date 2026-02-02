@@ -395,6 +395,7 @@ async def send_chat_message_stream(
         token_count = 0
         content_block_idx = 0
         tool_was_used = False
+        text_block_started = False
 
         try:
             await stream_session.start()
@@ -405,25 +406,60 @@ async def send_chat_message_stream(
                 "user_id": str(current_user.id),
             })
 
-            # Run tool-aware streaming in executor
+            # Yield message_start immediately
+            while not stream_session.queue.empty():
+                event = await stream_session.queue.get()
+                if event:
+                    yield event.to_sse()
+
+            # Use run_sync_generator_async for real-time streaming from sync generator
+            stream_queue: asyncio.Queue = asyncio.Queue()
             loop = asyncio.get_event_loop()
 
-            # We need to iterate over the generator in a thread-safe way
-            def run_stream_generator():
-                return list(ai_service.chat_with_tools_stream(
-                    message=message_in.content,
-                    image=image,
-                    chat_history=history[:-1],
-                    available_detections=existing_detections,
-                ))
+            def run_sync_stream():
+                """Run sync generator and put results in queue."""
+                try:
+                    gen = ai_service.chat_with_tools_stream(
+                        message=message_in.content,
+                        image=image,
+                        chat_history=history[:-1],
+                        available_detections=existing_detections,
+                    )
+                    for item in gen:
+                        asyncio.run_coroutine_threadsafe(
+                            stream_queue.put(("data", item)),
+                            loop
+                        )
+                    asyncio.run_coroutine_threadsafe(
+                        stream_queue.put(("done", None)),
+                        loop
+                    )
+                except Exception as e:
+                    logger.error(f"Stream generator error: {e}")
+                    asyncio.run_coroutine_threadsafe(
+                        stream_queue.put(("error", str(e))),
+                        loop
+                    )
 
-            stream_events = await loop.run_in_executor(
-                get_executor(),
-                run_stream_generator
-            )
+            # Start sync generator in thread
+            import concurrent.futures
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            executor.submit(run_sync_stream)
 
-            # Process stream events
-            for event_type, content, detections in stream_events:
+            # Process stream events as they arrive
+            while True:
+                try:
+                    msg_type, data = await asyncio.wait_for(stream_queue.get(), timeout=300.0)
+                except asyncio.TimeoutError:
+                    logger.warning("Stream timeout")
+                    break
+
+                if msg_type == "done":
+                    break
+                elif msg_type == "error":
+                    raise Exception(data)
+
+                event_type, content, detections = data
                 # Check if client disconnected
                 if await request.is_disconnected():
                     logger.info(f"Client disconnected, stopping stream for session {session_id}")
@@ -453,15 +489,16 @@ async def send_chat_message_stream(
                     await stream_session.emit_content_stop(content_block_idx)
                     content_block_idx += 1
 
-                    # Start text content block
+                    # Start text content block for response after tool
                     await stream_session.emit_content_start(content_block_idx, "text")
+                    text_block_started = True  # Mark as started to avoid duplicate
 
                 elif event_type == "text":
                     # Stream text response
-                    if not tool_was_used and content_block_idx == 1:
-                        # Direct response (no tool), start text block
+                    if not text_block_started:
+                        # Start text block (either after tool or for direct response)
                         await stream_session.emit_content_start(content_block_idx, "text")
-                        tool_was_used = True  # Prevent re-emitting start
+                        text_block_started = True
 
                     full_response.append(content)
                     token_count += len(content) // 4
@@ -472,14 +509,18 @@ async def send_chat_message_stream(
                     if detections:
                         final_detections = detections
 
-                # Yield events from queue
+                # Yield events from queue immediately for real-time streaming
                 while not stream_session.queue.empty():
                     event = await stream_session.queue.get()
                     if event:
                         yield event.to_sse()
 
-            # Close text content block
-            await stream_session.emit_content_stop(content_block_idx)
+            # Clean up executor
+            executor.shutdown(wait=False)
+
+            # Close text content block if started
+            if text_block_started:
+                await stream_session.emit_content_stop(content_block_idx)
 
             # Emit remaining events
             while not stream_session.queue.empty():

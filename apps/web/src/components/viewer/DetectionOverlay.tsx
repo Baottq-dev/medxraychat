@@ -55,12 +55,21 @@ export function DetectionOverlay({ className = '' }: DetectionOverlayProps) {
   const { showDetections, viewerState, imageDimensions, canvasDimensions } = useViewerStore();
   const { currentAnalysis } = useChatStore();
 
+  // Debug logging
+  if (currentAnalysis?.detections && currentAnalysis.detections.length > 0) {
+    console.log('[DetectionOverlay] Has detections:', currentAnalysis.detections.length);
+    console.log('[DetectionOverlay] showDetections:', showDetections);
+    console.log('[DetectionOverlay] imageDimensions:', imageDimensions);
+    console.log('[DetectionOverlay] canvasDimensions:', canvasDimensions);
+  }
+
   if (!showDetections || !currentAnalysis || currentAnalysis.detections.length === 0) {
     return null;
   }
 
   // Need dimensions to properly scale
   if (!imageDimensions || !canvasDimensions) {
+    console.log('[DetectionOverlay] Missing dimensions, skipping render');
     return null;
   }
 

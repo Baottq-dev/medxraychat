@@ -364,9 +364,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
                     ),
                   }));
                 } else if (data.delta?.type === 'detections_delta') {
-                  // Detections data
+                  // Detections data from AI analysis
                   try {
                     detections = JSON.parse(data.delta.text);
+                    console.log('[Chat] Received detections:', detections.length);
                     const mappedDetections = detections.map((d: any, idx: number) => ({
                       id: d.id || `det-${idx}`,
                       classId: d.class_id ?? d.classId ?? 0,
@@ -376,6 +377,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                       source: d.source ?? 'yolo',
                     }));
 
+                    console.log('[Chat] Mapped detections for overlay:', mappedDetections);
                     set({
                       currentAnalysis: {
                         id: aiPlaceholder.id,
@@ -388,8 +390,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
                         createdAt: new Date().toISOString(),
                       },
                     });
-                  } catch {
-                    // Ignore parse errors for detections
+                  } catch (e) {
+                    console.error('[Chat] Failed to parse detections:', e, data.delta?.text);
                   }
                 }
                 break;

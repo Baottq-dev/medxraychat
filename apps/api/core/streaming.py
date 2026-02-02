@@ -111,13 +111,15 @@ class StreamingSession:
         content_type: str = "text",
         metadata: Optional[dict] = None
     ) -> None:
-        """Emit content_block_start event."""
+        """Emit content_block_start event (Anthropic format)."""
         await self.queue.put(StreamEvent(
             type=StreamEventType.CONTENT_BLOCK_START,
             data={
                 "index": index,
-                "content_type": content_type,
-                "metadata": metadata or {},
+                "content_block": {
+                    "type": content_type,
+                    **(metadata or {}),
+                },
             }
         ))
 
