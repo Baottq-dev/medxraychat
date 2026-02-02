@@ -1,5 +1,8 @@
 """
 MedXrayChat Backend - AI Orchestration Service with Tool Calling
+
+Orchestrates YOLO and Qwen-VL services for comprehensive X-ray analysis
+with improved tool calling and thread-safe singleton pattern.
 """
 import time
 import json
@@ -11,7 +14,9 @@ from loguru import logger
 from schemas import Detection, BoundingBox, AIAnalyzeResponse
 from services.yolo_service import get_yolo_service, YOLOService
 from services.qwen_service import get_qwen_service, QwenVLService
-from services.tools import ToolName, ToolCall
+from services.tools import ToolName, ToolCall, ToolCallParser
+from core.singleton import ThreadSafeSingleton
+from core.exceptions import AIServiceError, InferenceError
 
 
 def weighted_boxes_fusion(
@@ -498,7 +503,7 @@ class AIService:
         yield ("done", "", detections if detections else None)
 
     def _parse_tool_call(self, response: str) -> Optional[ToolCall]:
-        """Parse tool call from Qwen's response.
+        """Parse tool call from Qwen's response using ToolCallParser.
 
         Args:
             response: Raw response from Qwen
@@ -506,60 +511,16 @@ class AIService:
         Returns:
             ToolCall object if found, None otherwise
         """
-        if not response:
-            return None
-
-        # Try multiple patterns to extract tool call JSON
-        patterns = [
-            # Full format: {"tool_call": {"name": "...", "args": {...}}}
-            r'\{\s*"tool_call"\s*:\s*(\{[^}]*"name"\s*:\s*"[^"]+?"[^}]*\})\s*\}',
-            # Simple format: {"name": "...", "args": {...}}
-            r'(\{\s*"name"\s*:\s*"[^"]+?"[^}]*\})',
-        ]
-
-        for pattern in patterns:
-            match = re.search(pattern, response, re.DOTALL)
-            if match:
-                try:
-                    # Extract the matched JSON
-                    json_str = match.group(1) if "tool_call" in pattern else match.group(0)
-
-                    # Handle nested format
-                    if "tool_call" in response and "tool_call" not in json_str:
-                        # We extracted inner object, parse it directly
-                        data = json.loads(json_str)
-                    else:
-                        full_match = match.group(0)
-                        data = json.loads(full_match)
-                        if "tool_call" in data:
-                            data = data["tool_call"]
-
-                    # Validate and create ToolCall
-                    name = data.get("name", "")
-                    args = data.get("args", {})
-
-                    # Check if name is valid
-                    try:
-                        tool_name = ToolName(name)
-                        return ToolCall(name=tool_name, args=args)
-                    except ValueError:
-                        logger.warning(f"Unknown tool name: {name}")
-                        continue
-
-                except (json.JSONDecodeError, KeyError, TypeError) as e:
-                    logger.debug(f"Failed to parse tool call: {e}")
-                    continue
-
-        return None
-
-
-# Global singleton
-_ai_service: Optional[AIService] = None
+        return ToolCallParser.parse(response)
 
 
 def get_ai_service() -> AIService:
-    """Get or create AI service singleton."""
-    global _ai_service
-    if _ai_service is None:
-        _ai_service = AIService()
-    return _ai_service
+    """Get or create AI service singleton (thread-safe).
+
+    Uses ThreadSafeSingleton to ensure only one instance is created
+    even under concurrent access from multiple threads.
+
+    Returns:
+        AIService singleton instance
+    """
+    return ThreadSafeSingleton.get_or_create("ai", AIService)

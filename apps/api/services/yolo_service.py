@@ -1,8 +1,12 @@
 """
 MedXrayChat Backend - YOLO Detection Service
+
+Thread-safe YOLO detection service with retry logic and circuit breaker
+for robust AI inference in concurrent environments.
 """
 import hashlib
 import time
+import threading
 from io import BytesIO
 from typing import List, Optional, Tuple
 from pathlib import Path
@@ -14,10 +18,33 @@ import cv2
 
 from schemas import Detection, BoundingBox
 from core.config import settings
+from core.singleton import ThreadSafeSingleton
+from core.exceptions import ModelNotLoadedError, InferenceError, GPUMemoryError
+from core.circuit_breaker import yolo_circuit
 
-# Simple in-memory cache for heatmaps (keyed by image hash)
+# Thread lock for GPU operations (YOLO inference should be serialized)
+_gpu_lock = threading.Lock()
+
+# Thread-safe cache for heatmaps
 _heatmap_cache: dict[str, bytes] = {}
+_heatmap_cache_lock = threading.Lock()
 _HEATMAP_CACHE_MAX_SIZE = 50  # Max number of cached heatmaps
+
+
+def _cache_get(key: str) -> Optional[bytes]:
+    """Thread-safe cache get."""
+    with _heatmap_cache_lock:
+        return _heatmap_cache.get(key)
+
+
+def _cache_set(key: str, value: bytes) -> None:
+    """Thread-safe cache set with LRU eviction."""
+    with _heatmap_cache_lock:
+        if len(_heatmap_cache) >= _HEATMAP_CACHE_MAX_SIZE:
+            # Remove oldest entry
+            oldest_key = next(iter(_heatmap_cache))
+            del _heatmap_cache[oldest_key]
+        _heatmap_cache[key] = value
 
 
 # Class names from VinDR-CXR dataset
@@ -148,42 +175,46 @@ class YOLOService:
             Tuple of (list of Detection objects, processing time in ms)
         """
         if self.model is None:
-            logger.error("YOLO model not loaded")
-            return [], 0
-        
+            raise ModelNotLoadedError("YOLO")
+
         start_time = time.time()
-        
+
+        def _do_inference():
+            """Inner function for circuit breaker wrapping."""
+            with _gpu_lock:  # Serialize GPU access
+                return self.model.predict(
+                    source=image,
+                    conf=conf_threshold,
+                    iou=iou_threshold,
+                    imgsz=img_size,
+                    device=self.device,
+                    verbose=False,
+                )
+
         try:
-            # Run inference
-            results = self.model.predict(
-                source=image,
-                conf=conf_threshold,
-                iou=iou_threshold,
-                imgsz=img_size,
-                device=self.device,
-                verbose=False,
-            )
-            
+            # Run inference with circuit breaker protection
+            results = yolo_circuit.call(_do_inference)
+
             detections = []
-            
+
             for result in results:
                 boxes = result.boxes
-                
+
                 if boxes is None or len(boxes) == 0:
                     continue
-                
+
                 for i in range(len(boxes)):
                     # Get box coordinates (xyxy format)
                     xyxy = boxes.xyxy[i].cpu().numpy()
                     conf = float(boxes.conf[i].cpu().numpy())
                     cls_id = int(boxes.cls[i].cpu().numpy())
-                    
+
                     # Get class name
                     if cls_id < len(VINDR_CLASSES):
                         cls_name = VINDR_CLASSES[cls_id]
                     else:
                         cls_name = f"class_{cls_id}"
-                    
+
                     detection = Detection(
                         class_id=cls_id,
                         class_name=cls_name,
@@ -197,17 +228,20 @@ class YOLOService:
                         source="yolo"
                     )
                     detections.append(detection)
-            
+
             processing_time = int((time.time() - start_time) * 1000)
             logger.info(f"YOLO detected {len(detections)} objects in {processing_time}ms")
-            
+
             return detections, processing_time
-            
+
+        except torch.cuda.OutOfMemoryError as e:
+            self._clear_gpu_memory()
+            raise GPUMemoryError(f"GPU OOM during YOLO inference: {e}")
+
         except Exception as e:
             logger.error(f"YOLO detection failed: {e}")
-            # Clear GPU memory on error
             self._clear_gpu_memory()
-            return [], 0
+            raise InferenceError(f"YOLO detection failed: {e}", model="YOLO")
 
     def _clear_gpu_memory(self) -> None:
         """Clear GPU memory cache to prevent memory leaks."""
@@ -694,17 +728,13 @@ class YOLOService:
         return output.getvalue()
 
 
-# Global singleton instance
-_yolo_service: Optional[YOLOService] = None
-
-
 def get_yolo_service() -> YOLOService:
-    """Get or create YOLO service singleton."""
-    global _yolo_service
-    if _yolo_service is None:
-        _yolo_service = YOLOService()
-    return _yolo_service
+    """Get or create YOLO service singleton (thread-safe).
 
+    Uses ThreadSafeSingleton to ensure only one instance is created
+    even under concurrent access from multiple threads.
 
-# Export singleton for direct import
-yolo_service = get_yolo_service()
+    Returns:
+        YOLOService singleton instance
+    """
+    return ThreadSafeSingleton.get_or_create("yolo", YOLOService)

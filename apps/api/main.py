@@ -1,5 +1,8 @@
 """
 MedXrayChat Backend - FastAPI Application Entry Point
+
+Includes structured logging, request tracking middleware,
+and centralized exception handling.
 """
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -16,6 +19,13 @@ from loguru import logger
 from core.config import settings
 from core.database import close_db
 from core.rate_limit import limiter
+from core.logging import setup_logging
+from core.exceptions import (
+    MedXrayChatError,
+    medxraychat_exception_handler,
+    generic_exception_handler,
+)
+from middleware.request_tracking import RequestTrackingMiddleware
 from api.v1 import router as api_v1_router
 from services.executor import shutdown_executor
 
@@ -38,6 +48,13 @@ class CORSPreflightMiddleware(BaseHTTPMiddleware):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan events."""
+    # Setup structured logging first
+    setup_logging(
+        json_output=settings.LOG_JSON_FORMAT,
+        log_level=settings.LOG_LEVEL,
+        log_file=settings.LOG_FILE,
+    )
+
     # Startup
     logger.info(f"Starting {settings.APP_NAME} v{settings.APP_VERSION}")
 
@@ -95,6 +112,9 @@ app = FastAPI(
 # Add CORS preflight middleware FIRST (will be outermost)
 app.add_middleware(CORSPreflightMiddleware)
 
+# Add request tracking middleware (for correlation IDs and request logging)
+app.add_middleware(RequestTrackingMiddleware)
+
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
@@ -106,7 +126,11 @@ app.add_middleware(
 
 # Configure rate limiter
 app.state.limiter = limiter
+
+# Register exception handlers
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_exception_handler(MedXrayChatError, medxraychat_exception_handler)
+app.add_exception_handler(Exception, generic_exception_handler)
 
 # Include API routers
 app.include_router(api_v1_router)

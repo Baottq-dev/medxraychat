@@ -107,6 +107,21 @@ class Settings(BaseSettings):
     # Mock mode for testing without Qwen model
     MOCK_QWEN_SERVICE: bool = True  # Set to False when you have the real model
 
+    # Logging Configuration
+    LOG_JSON_FORMAT: bool = False  # True for production (JSON logs)
+    LOG_LEVEL: str = "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+    LOG_FILE: Optional[str] = None  # Optional log file path
+
+    # Retry Configuration
+    RETRY_MAX_ATTEMPTS: int = 3
+    RETRY_MIN_WAIT: float = 1.0  # seconds
+    RETRY_MAX_WAIT: float = 10.0  # seconds
+
+    # Circuit Breaker Configuration
+    CIRCUIT_BREAKER_FAILURE_THRESHOLD: int = 3
+    CIRCUIT_BREAKER_RECOVERY_TIMEOUT: float = 60.0  # seconds
+    CIRCUIT_BREAKER_SUCCESS_THRESHOLD: int = 2
+
     @field_validator("CORS_ORIGINS")
     @classmethod
     def validate_cors_origins(cls, v: list[str], info) -> list[str]:

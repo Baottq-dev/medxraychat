@@ -1,9 +1,15 @@
 """
 MedXrayChat Backend - Tool Definitions for Function Calling
+
+Includes tool definitions and a robust ToolCallParser for extracting
+tool calls from LLM responses with multiple fallback strategies.
 """
+import json
+import re
 from enum import Enum
 from typing import Optional, List, Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, ValidationError
+from loguru import logger
 
 
 class ToolName(str, Enum):
@@ -143,3 +149,203 @@ Nếu KHÔNG cần tool, trả lời bình thường bằng text tiếng Việt.
 - Nếu đã có kết quả phân tích trong context, THAM KHẢO kết quả đó thay vì gọi analyze_xray lại
 - Với câu hỏi đơn giản, chào hỏi, hoặc hỏi thông tin chung → trả lời trực tiếp, KHÔNG gọi tool
 - Khi không chắc chắn → trả lời trực tiếp, KHÔNG gọi tool"""
+
+
+class ToolCallParser:
+    """Robust tool call parser with multiple fallback strategies.
+
+    Parsing strategies (in order):
+    1. Direct JSON parse - Entire response is valid JSON
+    2. Code block extraction - JSON in markdown code blocks
+    3. JSON object finding - Find JSON object anywhere in text
+    4. Fuzzy matching - Match tool names by keywords
+
+    Example:
+        tool_call = ToolCallParser.parse(response_text)
+        if tool_call:
+            execute_tool(tool_call)
+    """
+
+    # Trigger keywords for fuzzy matching (Vietnamese and English)
+    TOOL_TRIGGERS = {
+        ToolName.ANALYZE_XRAY: [
+            "analyze_xray", "phân tích", "detect", "kiểm tra ảnh",
+            "xem ảnh", "bất thường", "chẩn đoán", "phát hiện"
+        ],
+        ToolName.EXPLAIN_FINDING: [
+            "explain_finding", "giải thích", "là gì", "nguyên nhân",
+            "explain", "what is"
+        ],
+        ToolName.GENERATE_REPORT: [
+            "generate_report", "báo cáo", "report", "tạo báo cáo",
+            "xuất report", "viết kết luận"
+        ],
+    }
+
+    @classmethod
+    def parse(cls, response: str) -> Optional[ToolCall]:
+        """Parse tool call from LLM response using multiple strategies.
+
+        Args:
+            response: Raw response text from LLM
+
+        Returns:
+            ToolCall if found, None otherwise
+        """
+        if not response or not response.strip():
+            return None
+
+        # Strategy 1: Direct JSON parse
+        result = cls._try_direct_json(response)
+        if result:
+            logger.debug(f"Tool call parsed via direct JSON: {result.name}")
+            return result
+
+        # Strategy 2: Extract from markdown code blocks
+        result = cls._try_code_block(response)
+        if result:
+            logger.debug(f"Tool call parsed from code block: {result.name}")
+            return result
+
+        # Strategy 3: Find JSON object anywhere in text
+        result = cls._try_find_json(response)
+        if result:
+            logger.debug(f"Tool call found in text: {result.name}")
+            return result
+
+        # Strategy 4: Fuzzy match tool names (last resort)
+        result = cls._try_fuzzy_match(response)
+        if result:
+            logger.debug(f"Tool call fuzzy matched: {result.name}")
+            return result
+
+        return None
+
+    @classmethod
+    def _try_direct_json(cls, text: str) -> Optional[ToolCall]:
+        """Try parsing entire response as JSON."""
+        try:
+            text = text.strip()
+            data = json.loads(text)
+            return cls._validate_and_create(data)
+        except (json.JSONDecodeError, ValidationError):
+            return None
+
+    @classmethod
+    def _try_code_block(cls, text: str) -> Optional[ToolCall]:
+        """Extract JSON from markdown code blocks."""
+        patterns = [
+            r'```json\s*(.*?)\s*```',
+            r'```\s*(\{.*?\})\s*```',
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text, re.DOTALL)
+            if match:
+                try:
+                    data = json.loads(match.group(1))
+                    result = cls._validate_and_create(data)
+                    if result:
+                        return result
+                except (json.JSONDecodeError, ValidationError):
+                    continue
+        return None
+
+    @classmethod
+    def _try_find_json(cls, text: str) -> Optional[ToolCall]:
+        """Find JSON object anywhere in text using bracket matching."""
+        depth = 0
+        start_idx = None
+
+        for i, char in enumerate(text):
+            if char == '{':
+                if depth == 0:
+                    start_idx = i
+                depth += 1
+            elif char == '}':
+                depth -= 1
+                if depth == 0 and start_idx is not None:
+                    try:
+                        json_str = text[start_idx:i + 1]
+                        data = json.loads(json_str)
+                        result = cls._validate_and_create(data)
+                        if result:
+                            return result
+                    except (json.JSONDecodeError, ValidationError):
+                        pass
+                    start_idx = None
+
+        return None
+
+    @classmethod
+    def _try_fuzzy_match(cls, text: str) -> Optional[ToolCall]:
+        """Fuzzy match tool names based on keywords in text."""
+        text_lower = text.lower()
+
+        for tool_name, triggers in cls.TOOL_TRIGGERS.items():
+            for trigger in triggers:
+                if trigger in text_lower:
+                    # Extract finding name for explain_finding if possible
+                    if tool_name == ToolName.EXPLAIN_FINDING:
+                        args = cls._extract_finding_name(text)
+                    else:
+                        args = {}
+
+                    logger.debug(
+                        f"Fuzzy matched tool '{tool_name}' from trigger '{trigger}'"
+                    )
+                    return ToolCall(name=tool_name, args=args)
+
+        return None
+
+    @classmethod
+    def _extract_finding_name(cls, text: str) -> dict:
+        """Try to extract finding name from text for explain_finding tool."""
+        # Common finding names
+        findings = [
+            "Cardiomegaly", "Pleural effusion", "Pneumothorax",
+            "Atelectasis", "Consolidation", "Edema", "Emphysema",
+            "Nodule", "Mass", "Infiltration", "Pneumonia",
+            "Aortic enlargement", "Calcification", "Fibrosis",
+        ]
+
+        text_lower = text.lower()
+        for finding in findings:
+            if finding.lower() in text_lower:
+                return {"finding_name": finding}
+
+        return {}
+
+    @classmethod
+    def _validate_and_create(cls, data: dict) -> Optional[ToolCall]:
+        """Validate data structure and create ToolCall.
+
+        Args:
+            data: Parsed JSON data
+
+        Returns:
+            ToolCall if valid, None otherwise
+        """
+        try:
+            # Handle nested format: {"tool_call": {...}}
+            if "tool_call" in data:
+                data = data["tool_call"]
+
+            # Validate required fields
+            name = data.get("name")
+            if not name:
+                return None
+
+            # Validate tool name
+            try:
+                tool_name = ToolName(name)
+            except ValueError:
+                logger.debug(f"Unknown tool name: {name}")
+                return None
+
+            args = data.get("args", {})
+
+            return ToolCall(name=tool_name, args=args)
+
+        except (KeyError, TypeError) as e:
+            logger.debug(f"Tool call validation failed: {e}")
+            return None

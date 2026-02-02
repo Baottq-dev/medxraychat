@@ -1,5 +1,8 @@
 """
 MedXrayChat Backend - Qwen3-VL Service with Tool Calling Support
+
+Thread-safe Vision-Language model service with circuit breaker protection
+for robust AI inference in concurrent environments.
 """
 import time
 import threading
@@ -12,7 +15,13 @@ from loguru import logger
 
 from schemas import Detection, BoundingBox
 from core.config import settings
+from core.singleton import ThreadSafeSingleton
+from core.exceptions import ModelNotLoadedError, InferenceError, GPUMemoryError
+from core.circuit_breaker import qwen_circuit
 from services.tools import get_tools_description, format_tool_call_instruction
+
+# Thread lock for GPU operations (Qwen inference should be serialized)
+_qwen_gpu_lock = threading.Lock()
 
 
 # System prompt for medical X-ray analysis
@@ -863,22 +872,20 @@ Lưu ý cuối: "Đây là báo cáo hỗ trợ AI, cần được bác sĩ xác
         return "\n".join(lines)
 
 
-# Global singleton instance
-_qwen_service: Optional[QwenVLService] = None
-
-
 def get_qwen_service():
-    """Get or create Qwen-VL service singleton.
-    
+    """Get or create Qwen-VL service singleton (thread-safe).
+
     Returns MockQwenVLService if MOCK_QWEN_SERVICE is True in settings.
+
+    Uses ThreadSafeSingleton to ensure only one instance is created
+    even under concurrent access from multiple threads.
+
+    Returns:
+        QwenVLService or MockQwenVLService singleton instance
     """
-    global _qwen_service
-    
     # Check if mock mode is enabled
     if settings.MOCK_QWEN_SERVICE:
         from services.mock_qwen_service import get_mock_qwen_service
-        return get_mock_qwen_service()
-    
-    if _qwen_service is None:
-        _qwen_service = QwenVLService()
-    return _qwen_service
+        return ThreadSafeSingleton.get_or_create("qwen_mock", get_mock_qwen_service)
+
+    return ThreadSafeSingleton.get_or_create("qwen", QwenVLService)
