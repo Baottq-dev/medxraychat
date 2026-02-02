@@ -42,7 +42,10 @@ export function AIAnalysisPanel({ currentImage, studyId, className }: AIAnalysis
     analyzeImage,
     messages,
     sendMessage,
+    sendMessageStream,
     isSending,
+    isStreaming,
+    streamingContent,
     createSession,
     currentSession,
     fetchSessionByStudy,
@@ -88,13 +91,8 @@ export function AIAnalysisPanel({ currentImage, studyId, className }: AIAnalysis
         await createSession(studyId, 'AI Analysis');
       }
 
-      // Send analysis request as a message
-      await sendMessage('Phân tích ảnh X-quang này và đưa ra nhận xét chi tiết về các phát hiện, bất thường (nếu có), và đề xuất.', currentImage.id);
-
-      toast({
-        title: 'Đang phân tích',
-        description: 'AI đang phân tích ảnh X-quang...',
-      });
+      // Send analysis request as a streaming message
+      await sendMessageStream('Phân tích ảnh X-quang này và đưa ra nhận xét chi tiết về các phát hiện, bất thường (nếu có), và đề xuất.', currentImage.id);
     } catch (error) {
       toast({
         title: 'Lỗi phân tích',
@@ -122,8 +120,9 @@ export function AIAnalysisPanel({ currentImage, studyId, className }: AIAnalysis
         await createSession(studyId, 'AI Chat');
       }
 
-      await sendMessage(chatInput, currentImage?.id);
+      const messageToSend = chatInput;
       setChatInput('');
+      await sendMessageStream(messageToSend, currentImage?.id);
     } catch (error) {
       toast({
         title: 'Lỗi',
@@ -143,10 +142,18 @@ export function AIAnalysisPanel({ currentImage, studyId, className }: AIAnalysis
       return;
     }
 
-    if (!currentSession) {
-      await createSession(studyId, 'AI Analysis');
+    try {
+      if (!currentSession) {
+        await createSession(studyId, 'AI Analysis');
+      }
+      await sendMessageStream(prompt, currentImage?.id);
+    } catch (error) {
+      toast({
+        title: 'Lỗi',
+        description: 'Không thể gửi tin nhắn',
+        variant: 'destructive',
+      });
     }
-    await sendMessage(prompt, currentImage?.id);
   };
 
   const handleExportReport = () => {
@@ -173,7 +180,7 @@ export function AIAnalysisPanel({ currentImage, studyId, className }: AIAnalysis
             size="sm"
             className="h-7 px-2 text-xs text-blue-400 hover:text-blue-300 hover:bg-blue-500/10"
             onClick={handleAnalyze}
-            disabled={!currentImage || isAnalyzing || isSending}
+            disabled={!currentImage || isAnalyzing || isSending || isStreaming}
           >
             {isAnalyzing ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -225,7 +232,7 @@ export function AIAnalysisPanel({ currentImage, studyId, className }: AIAnalysis
                   key={index}
                   className="px-3 py-2 text-xs bg-slate-700/50 hover:bg-slate-700 rounded-lg text-slate-300 transition-colors text-left"
                   onClick={() => handleQuickPrompt(item.prompt)}
-                  disabled={isSending}
+                  disabled={isSending || isStreaming}
                 >
                   {item.label}
                 </button>
@@ -239,8 +246,8 @@ export function AIAnalysisPanel({ currentImage, studyId, className }: AIAnalysis
               <ChatBubble key={message.id} message={message} />
             ))}
 
-            {/* Loading indicator when AI is responding */}
-            {(isSending || isAnalyzing) && (
+            {/* Loading indicator when AI is responding (only show if not streaming) */}
+            {(isSending || isAnalyzing) && !isStreaming && (
               <div className="flex gap-2">
                 <div className="flex-shrink-0 w-7 h-7 rounded-full bg-slate-600 flex items-center justify-center">
                   <Bot className="h-4 w-4 text-white" />
@@ -269,7 +276,7 @@ export function AIAnalysisPanel({ currentImage, studyId, className }: AIAnalysis
                 key={index}
                 className="px-2 py-1 text-xs bg-slate-700/50 hover:bg-slate-700 rounded text-slate-400 hover:text-slate-300 transition-colors"
                 onClick={() => handleQuickPrompt(item.prompt)}
-                disabled={isSending}
+                disabled={isSending || isStreaming}
               >
                 {item.label}
               </button>
@@ -285,15 +292,15 @@ export function AIAnalysisPanel({ currentImage, studyId, className }: AIAnalysis
             onChange={(e) => setChatInput(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && handleSendMessage()}
             className="bg-slate-700 border-slate-600 text-sm text-white placeholder:text-slate-500"
-            disabled={isSending || !currentImage}
+            disabled={isSending || isStreaming || !currentImage}
           />
           <Button
             size="icon"
             className="bg-blue-600 hover:bg-blue-700 flex-shrink-0"
             onClick={handleSendMessage}
-            disabled={!chatInput.trim() || isSending || !currentImage}
+            disabled={!chatInput.trim() || isSending || isStreaming || !currentImage}
           >
-            {isSending ? (
+            {isSending || isStreaming ? (
               <Loader2 className="h-4 w-4 animate-spin" />
             ) : (
               <Send className="h-4 w-4" />
