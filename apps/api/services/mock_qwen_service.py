@@ -6,7 +6,7 @@ Use this when you don't have the Qwen model weights or GPU resources.
 """
 import time
 import random
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Generator
 from PIL import Image
 from loguru import logger
 
@@ -339,6 +339,36 @@ Hệ thống AI đã phát hiện một số vùng cần chú ý trên ảnh X-q
 """
         
         return response
+
+    def chat_stream(
+        self,
+        messages: List[dict],
+        image: Optional[Image.Image] = None,
+        max_new_tokens: int = 512,
+    ) -> Generator[str, None, None]:
+        """Mock streaming chat - yields response in chunks.
+
+        Args:
+            messages: List of chat messages
+            image: Optional image context
+            max_new_tokens: Ignored in mock
+
+        Yields:
+            Response text chunks
+        """
+        # Get full response first
+        response, _ = self.chat(messages, image, max_new_tokens)
+
+        # Simulate streaming by yielding chunks
+        words = response.split(' ')
+        chunk_size = 3  # words per chunk
+
+        for i in range(0, len(words), chunk_size):
+            chunk = ' '.join(words[i:i + chunk_size])
+            if i > 0:
+                chunk = ' ' + chunk
+            yield chunk
+            time.sleep(random.uniform(0.02, 0.05))  # Simulate typing delay
 
 
 # Singleton instance
