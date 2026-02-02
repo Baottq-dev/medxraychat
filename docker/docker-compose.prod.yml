@@ -13,7 +13,7 @@
 services:
   # Traefik Reverse Proxy - Tự động SSL từ Let's Encrypt
   traefik:
-    image: traefik:v3.0
+    image: traefik:v2.11
     container_name: medxraychat-traefik
     restart: always
     command:
