@@ -428,14 +428,24 @@ class AIService:
         tool_call = self._parse_tool_call(full_response)
 
         if tool_call is None:
-            # No tool call found - stream response as direct text
-            logger.info("No tool call detected, streaming direct response")
-            # Stream in chunks for consistent UX
-            chunk_size = 20
-            for i in range(0, len(full_response), chunk_size):
-                yield ("text", full_response[i:i + chunk_size], None)
-            yield ("done", "", None)
-            return
+            # Check if message suggests analysis but Qwen didn't output tool call
+            analysis_keywords = ["phân tích", "kiểm tra", "xem ảnh", "detect", "bất thường", "chẩn đoán"]
+            message_lower = message.lower()
+            should_analyze = any(kw in message_lower for kw in analysis_keywords)
+
+            if should_analyze and image is not None:
+                # Fallback: run YOLO anyway since user clearly wants analysis
+                logger.warning("No tool call but analysis keywords detected - running YOLO as fallback")
+                tool_call = ToolCall(name=ToolName.ANALYZE_XRAY, args={})
+            else:
+                # No tool call found - stream response as direct text
+                logger.info("No tool call detected, streaming direct response")
+                # Stream in chunks for consistent UX
+                chunk_size = 20
+                for i in range(0, len(full_response), chunk_size):
+                    yield ("text", full_response[i:i + chunk_size], None)
+                yield ("done", "", None)
+                return
 
         # Execute tool with status updates
         logger.info(f"Tool call detected: {tool_call.name}")
