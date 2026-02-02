@@ -333,10 +333,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
               case 'content_block_start':
                 // New content block starting - check block type
+                console.log('[Chat] content_block_start:', data.content_block);
                 if (data.content_block?.type === 'thinking') {
+                  console.log('[Chat] Setting thinking state');
                   set({ isThinking: true, toolStatus: 'Đang phân tích yêu cầu...' });
                 } else if (data.content_block?.type === 'tool_use') {
-                  set({ isThinking: false, currentTool: 'tool_use' });
+                  set({ isThinking: false, currentTool: 'tool_use', toolStatus: data.content_block?.status || 'Đang thực hiện...' });
                 }
                 break;
 

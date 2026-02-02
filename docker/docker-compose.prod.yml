@@ -1,16 +1,46 @@
-# MedXrayChat - Production Docker Compose (GPU Server)
-# Full pipeline: YOLO + Qwen3-VL + Frontend
+# MedXrayChat - Production Docker Compose (GPU Server + HTTPS)
+# Full pipeline: YOLO + Qwen3-VL + Frontend + SSL tự động
 #
-# Usage:
-#   1. Copy .env.prod.example to .env and fill in values
-#   2. docker-compose -f docker-compose.prod.yml up -d --build
+# Yêu cầu:
+#   1. NVIDIA GPU với >= 16GB VRAM
+#   2. Domain đã trỏ A Record về IP của VM
+#   3. Port 80, 443 đã mở trên GCP Firewall
 #
-# Requirements:
-#   - NVIDIA GPU with >= 16GB VRAM (RTX 4090, A100, etc.)
-#   - NVIDIA Container Toolkit installed
-#   - Qwen model weights in ../weights/qwen/
+# Sử dụng:
+#   1. Copy .env.prod.example to .env và điền các giá trị
+#   2. docker compose -f docker-compose.prod.yml up -d --build
 
 services:
+  # Traefik Reverse Proxy - Tự động SSL từ Let's Encrypt
+  traefik:
+    image: traefik:v3.0
+    container_name: medxraychat-traefik
+    restart: always
+    command:
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.network=medxray-network"
+      # HTTP -> HTTPS redirect
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+      # HTTPS
+      - "--entrypoints.websecure.address=:443"
+      - "--entrypoints.websecure.http.tls.certResolver=letsencrypt"
+      # Let's Encrypt
+      - "--certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL}"
+      - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
+      - "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web"
+      - "--log.level=INFO"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+      - "letsencrypt_data:/letsencrypt"
+    networks:
+      - medxray-network
+
   # PostgreSQL Database
   postgres:
     image: postgres:16-alpine
@@ -23,8 +53,6 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
-    ports:
-      - "5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-medxray}"]
       interval: 10s
@@ -39,8 +67,6 @@ services:
     container_name: medxraychat-redis
     restart: always
     command: redis-server --appendonly yes
-    ports:
-      - "6379:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -59,29 +85,22 @@ services:
     container_name: medxraychat-backend
     restart: always
     environment:
-      # App settings
-      - DEBUG=false
+      - DEBUG=${DEBUG:-true}
       - PRELOAD_AI_MODELS=true
-      # Database
       - POSTGRES_HOST=postgres
       - POSTGRES_PORT=5432
       - POSTGRES_USER=${POSTGRES_USER:-medxray}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
       - POSTGRES_DB=${POSTGRES_DB:-medxraychat}
-      # Redis
       - REDIS_URL=redis://redis:6379
-      # Security
       - SECRET_KEY=${SECRET_KEY}
-      # AI Models - IMPORTANT: Set to false to use real Qwen model
-      - MOCK_QWEN_SERVICE=false
+      - MOCK_QWEN_SERVICE=${MOCK_QWEN_SERVICE:-false}
       - AI_DEVICE=auto
       - YOLO_MODEL_PATH=/app/weights/yolo/best.pt
       - QWEN_MODEL_NAME=/app/weights/qwen
     volumes:
       - uploads_data:/app/uploads
       - ../weights:/app/weights:ro
-    ports:
-      - "8000:8000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -102,6 +121,12 @@ services:
       retries: 3
     networks:
       - medxray-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.backend.rule=Host(`${DOMAIN}`) && (PathPrefix(`/api`) || PathPrefix(`/health`) || PathPrefix(`/docs`) || PathPrefix(`/openapi.json`))"
+      - "traefik.http.routers.backend.entrypoints=websecure"
+      - "traefik.http.routers.backend.tls.certresolver=letsencrypt"
+      - "traefik.http.services.backend.loadbalancer.server.port=8000"
 
   # Next.js Frontend
   frontend:
@@ -109,43 +134,31 @@ services:
       context: ..
       dockerfile: docker/Dockerfile.frontend
       args:
-        - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8000/api/v1}
-        - NEXT_PUBLIC_WS_URL=${NEXT_PUBLIC_WS_URL:-ws://localhost:8000/api/v1/ws}
+        - NEXT_PUBLIC_API_URL=https://${DOMAIN}/api/v1
+        - NEXT_PUBLIC_WS_URL=wss://${DOMAIN}/api/v1/ws
     container_name: medxraychat-frontend
     restart: always
     environment:
-      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8000/api/v1}
-      - NEXT_PUBLIC_WS_URL=${NEXT_PUBLIC_WS_URL:-ws://localhost:8000/api/v1/ws}
-    ports:
-      - "3000:3000"
+      - NEXT_PUBLIC_API_URL=https://${DOMAIN}/api/v1
+      - NEXT_PUBLIC_WS_URL=wss://${DOMAIN}/api/v1/ws
     depends_on:
       backend:
         condition: service_healthy
     networks:
       - medxray-network
-
-  # Nginx Reverse Proxy (optional, for production with domain)
-  nginx:
-    image: nginx:alpine
-    container_name: medxraychat-nginx
-    restart: always
-    volumes:
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-    ports:
-      - "80:80"
-      - "443:443"
-    depends_on:
-      - frontend
-      - backend
-    profiles:
-      - with-nginx
-    networks:
-      - medxray-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.frontend.rule=Host(`${DOMAIN}`)"
+      - "traefik.http.routers.frontend.entrypoints=websecure"
+      - "traefik.http.routers.frontend.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.frontend.priority=1"
+      - "traefik.http.services.frontend.loadbalancer.server.port=3000"
 
 volumes:
   postgres_data:
   redis_data:
   uploads_data:
+  letsencrypt_data:
 
 networks:
   medxray-network:
