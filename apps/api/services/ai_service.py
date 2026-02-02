@@ -380,11 +380,15 @@ class AIService:
         chat_history: Optional[List[dict]] = None,
         available_detections: Optional[List[Detection]] = None,
     ) -> Generator[Tuple[str, str, Optional[List[Detection]]], None, None]:
-        """2-Phase streaming chat with tool calling support.
+        """Streaming chat with real-time tool detection.
+
+        Uses streaming tool decision to start response immediately:
+        - If response starts with '{' → tool call JSON → execute tool
+        - If response starts with text → direct response → stream through
 
         Yields events in format: (event_type, content, detections)
         Event types:
-        - "thinking": AI is analyzing the request
+        - "thinking": AI is analyzing (only shown briefly if tool detected)
         - "tool_start": Tool execution starting
         - "tool_result": Tool finished, includes detections if any
         - "text": Text chunk from response
@@ -399,31 +403,64 @@ class AIService:
         Yields:
             Tuple of (event_type, content, detections or None)
         """
-        # Phase 1: Qwen decides if tool is needed
-        yield ("thinking", "Đang phân tích yêu cầu...", None)
-
-        decision_response, _ = self.qwen.chat_for_tool_decision(
+        # Stream tool decision - response starts immediately!
+        decision_stream = self.qwen.chat_for_tool_decision_stream(
             message, image, chat_history, available_detections
         )
 
-        tool_call = self._parse_tool_call(decision_response)
+        # Buffer to detect if it's JSON (tool call) or text (direct response)
+        buffer = ""
+        is_json = None  # None = unknown, True = JSON, False = text
+        json_detection_chars = 10  # Check first N chars to determine type
 
-        if tool_call is None:
-            # No tool needed - use decision_response directly (already a complete answer)
-            # Don't call Qwen again - that would double the latency!
-            logger.info("No tool call detected, using decision response directly")
+        for chunk in decision_stream:
+            buffer += chunk
 
-            # Stream the decision_response in chunks for consistent UX
-            # Split into reasonable chunks to simulate streaming
-            chunk_size = 20  # characters per chunk
-            for i in range(0, len(decision_response), chunk_size):
-                chunk = decision_response[i:i + chunk_size]
+            # Determine response type from initial characters
+            if is_json is None and len(buffer) >= json_detection_chars:
+                stripped = buffer.strip()
+                # JSON tool call starts with { or "
+                is_json = stripped.startswith('{') or stripped.startswith('"')
+
+                if is_json:
+                    # It's a tool call - show thinking indicator
+                    logger.info("Detected tool call JSON, buffering...")
+                    yield ("thinking", "Đang xử lý yêu cầu...", None)
+                else:
+                    # It's direct text - start streaming immediately
+                    logger.info("Direct response detected, streaming...")
+                    yield ("text", buffer, None)
+                    buffer = ""  # Clear buffer, continue streaming
+
+            elif is_json is False:
+                # Continue streaming text directly
                 yield ("text", chunk, None)
 
+        # Handle remaining buffer
+        if is_json is None:
+            # Short response - check type
+            stripped = buffer.strip()
+            is_json = stripped.startswith('{') or stripped.startswith('"')
+            if not is_json:
+                # Short text response
+                yield ("text", buffer, None)
+
+        if not is_json:
+            # Direct text response - already streamed, just finish
             yield ("done", "", None)
             return
 
-        # Phase 2: Execute tool with status updates
+        # is_json = True: Parse tool call from complete JSON response
+        tool_call = self._parse_tool_call(buffer)
+
+        if tool_call is None:
+            # Failed to parse - treat as text
+            logger.warning(f"Failed to parse tool call, treating as text: {buffer[:100]}")
+            yield ("text", buffer, None)
+            yield ("done", "", None)
+            return
+
+        # Execute tool with status updates
         logger.info(f"Tool call detected: {tool_call.name}")
 
         detections = []

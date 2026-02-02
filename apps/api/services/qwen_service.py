@@ -607,6 +607,45 @@ class QwenVLService:
         # Use shorter max_tokens for decision (we only need JSON or short response)
         return self.chat(messages, image, max_new_tokens=256)
 
+    def chat_for_tool_decision_stream(
+        self,
+        message: str,
+        image: Optional[Image.Image] = None,
+        chat_history: Optional[List[dict]] = None,
+        existing_detections: Optional[List[Detection]] = None,
+    ) -> Generator[str, None, None]:
+        """Stream version of chat_for_tool_decision for immediate response start.
+
+        This allows streaming to begin immediately while we detect if it's a tool
+        call (JSON) or direct response (text).
+
+        Args:
+            message: User message
+            image: Optional image context
+            chat_history: Previous chat messages
+            existing_detections: Detections already available in session
+
+        Yields:
+            Response text chunks (may be JSON for tool call or plain text)
+        """
+        # Format existing detections for context
+        det_text = "Chưa có kết quả phân tích."
+        if existing_detections and len(existing_detections) > 0:
+            det_text = self._format_detections_text(existing_detections)
+
+        system_prompt = TOOL_SYSTEM_PROMPT.format(existing_detections=det_text)
+
+        messages = [{"role": "system", "content": system_prompt}]
+
+        # Add recent chat history for context (limit to last 6 messages)
+        if chat_history:
+            messages.extend(chat_history[-6:])
+
+        messages.append({"role": "user", "content": message})
+
+        # Stream with shorter max_tokens
+        return self.chat_stream(messages, image, max_new_tokens=256)
+
     def chat_stream_simple(
         self,
         message: str,
