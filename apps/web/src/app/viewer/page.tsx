@@ -119,6 +119,11 @@ function ViewerPageContent() {
     setShowUploadModal(true);
   }, []);
 
+  // Memoized callback for image load error (prevents image reload during streaming)
+  const handleImageError = useCallback((error: Error) => {
+    console.error('Image load error:', error);
+  }, []);
+
   // Handle upload submit
   const handleUploadSubmit = async (studyInfo: {
     patientName: string;
@@ -310,7 +315,7 @@ function ViewerPageContent() {
                 <DicomViewer
                   image={currentImage}
                   className="absolute inset-0"
-                  onError={(error) => console.error('Image load error:', error)}
+                  onError={handleImageError}
                 />
 
                 {/* Overlays */}

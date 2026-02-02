@@ -20,6 +20,8 @@ import {
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { toast } from '@/hooks/use-toast';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
 interface AIAnalysisPanelProps {
   currentImage: DicomImage | null;
@@ -332,7 +334,15 @@ function ChatBubble({ message }: { message: ChatMessage }) {
           isUser ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-200'
         )}
       >
-        <div className="whitespace-pre-wrap">{message.content}</div>
+        {isUser ? (
+          <div className="whitespace-pre-wrap">{message.content}</div>
+        ) : (
+          <div className="prose prose-sm prose-invert max-w-none prose-headings:text-slate-100 prose-headings:font-semibold prose-headings:mt-2 prose-headings:mb-1 prose-p:my-1 prose-ul:my-1 prose-ol:my-1 prose-li:my-0 prose-strong:text-yellow-300 prose-em:text-blue-300">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+              {message.content}
+            </ReactMarkdown>
+          </div>
+        )}
         {/* Timestamp */}
         <div className={cn(
           'text-xs mt-1',
