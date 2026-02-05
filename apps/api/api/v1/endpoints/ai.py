@@ -21,7 +21,7 @@ from schemas import (
 )
 from api.deps import CurrentUser, DbSession
 from services import get_ai_service
-from services.yolo_service import yolo_service
+from services.yolo_service import get_yolo_service
 from services.executor import get_executor
 from core.rate_limit import limiter
 from core.image_utils import load_image_from_file
@@ -295,7 +295,7 @@ async def test_heatmap(image_id: uuid.UUID, current_user: CurrentUser, db: DbSes
     image_bytes = file_path.read_bytes()
     logger.info(f"Image bytes: {len(image_bytes)}")
 
-    heatmap_bytes = yolo_service.generate_heatmap(image_bytes)
+    heatmap_bytes = get_yolo_service().generate_heatmap(image_bytes)
     logger.info(f"Heatmap bytes: {len(heatmap_bytes)}")
     
     return Response(
@@ -353,7 +353,7 @@ async def get_heatmap(
     # Generate heatmap using GradCAM
     try:
         logger.info("Generating GradCAM heatmap...")
-        heatmap_bytes = yolo_service.generate_heatmap(image_bytes)
+        heatmap_bytes = get_yolo_service().generate_heatmap(image_bytes)
         logger.info(f"Heatmap generated: {len(heatmap_bytes)} bytes")
         
         if not heatmap_bytes or len(heatmap_bytes) == 0:
