@@ -72,11 +72,27 @@ curl -sS https://bootstrap.pypa.io/get-pip.py | python3.11
 log_info "Python version: $(python3 --version)"
 
 # ============================================================
-# 4. Install Node.js 20
+# 4. Install Node.js 20 (via NodeSource)
 # ============================================================
 log_info "Installing Node.js 20..."
+# Remove old nodejs if exists
+sudo apt-get remove -y nodejs npm 2>/dev/null || true
+
+# Install Node.js 20 from NodeSource
 curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
 sudo apt-get install -y nodejs
+
+# Verify version
+node_version=$(node --version 2>/dev/null || echo "not installed")
+if [[ "$node_version" != v20* ]]; then
+    log_warn "NodeSource failed, trying NVM..."
+    curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.0/install.sh | bash
+    export NVM_DIR="$HOME/.nvm"
+    [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+    nvm install 20
+    nvm use 20
+    nvm alias default 20
+fi
 
 log_info "Node version: $(node --version)"
 log_info "npm version: $(npm --version)"
