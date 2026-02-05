@@ -100,7 +100,7 @@ class Settings(BaseSettings):
 
     # AI Processing
     AI_THREAD_WORKERS: int = 4
-    AI_DEVICE: str = "auto"  # 'auto', 'cuda', 'cpu', 'cuda:0', etc.
+    AI_DEVICE: str = "cuda"  # 'auto', 'cuda', 'cpu', 'cuda:0', etc.
     PRELOAD_AI_MODELS: bool = True
     QWEN_MAX_CONTEXT_TOKENS: int = 4096
     
